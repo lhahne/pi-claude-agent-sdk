@@ -6,7 +6,7 @@ Pi extension that integrates Claude Code as a pi model provider via the [Agent S
 
 Use Opus/Sonnet/Haiku as models in pi, with all tool calls flowing through pi's TUI.
 
-**FYI:** Anthropic [announced and then unannounced](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan) a change to how you would be billed for tools that use the Agent SDK like this one. As of June 15, 2026 it uses subscription quota just like Claude Code direct does.
+**FYI:** Anthropic [announced and then unannounced](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan) a change to how you would be billed for tools that use the Agent SDK like this one. It currently uses your regular subscription quota just like Claude Code.
 
 <p>
 <a href="assets/claude-bridge1.png"><img src="assets/claude-bridge1.png" width="49%"></a>&nbsp;
@@ -47,8 +47,6 @@ Config: `~/.pi/agent/claude-bridge.json` (global) or the project Pi config direc
 `provider`:
 - `plan` (default `"max"`) — Max (or Team Premium/Enterprise). Set to `"pro"` on a Pro plan so Opus 4.6 stays at 200K context. If it's unset, the first interactive session points this out once, then records `startupNoticeShown` (the date, `YYYY-MM-DD`) in the global config so it doesn't nag again.
 - `longContextExtraUsage` — set to `true` to enable 1M models that cost money through Extra Usage. It enables Sonnet 4.6 with 1M on every plan and Opus 4.6 with 1M on Pro. Not needed for Opus 4.7 or 4.8.
-- `appendSystemPrompt` — append pi's project context files (global and ancestor `AGENTS.md` / `CLAUDE.md`) and skills (default `true`)
-- `settingSources` — CC filesystem settings to load; only applied when `appendSystemPrompt: false`
 - `strictMcpConfig` — block MCP servers from `~/.claude.json` / `.mcp.json` (default `true`). Cloud MCP (Gmail/Drive via claude.ai OAuth) is always blocked.
 - `autoMemoryEnabled` — enable Claude Code's auto-memory system (default `false`)
 - `pathToClaudeCodeExecutable` — path to the `claude` binary. Useful if your OS/filesystem has the SDK's bundled musl/glibc binaries in a place where they can't run. For example, with Nix you can set the binary to e.g. `"/home/you/.nix-profile/bin/claude"`.
@@ -71,3 +69,9 @@ Set `CLAUDE_BRIDGE_DEBUG=1` to enable debug output:
 - **Per-query Claude Code CLI logs** at `~/.pi/agent/cc-cli-logs/<timestamp>-<tag>-<seq>.log` — the CC subprocess's own debug stream, one file per `query()` call. Tags are `provider` (main turn) or `compact-summary`. Useful when a resume fails or CC misbehaves internally — shows the CLI's own view of session loading, API requests, and tool calls.
 
 When filing a bug about a session-resume failure (e.g. "No conversation found"), the most useful attachments are the `syncResult:` lines from the bridge log plus the matching `cc-cli-logs/` file for the failing query.
+
+## Known issues
+
+**Sessions get rebuilt more often than they need to be, and a rebuild is expensive.** The bridge rewrites Claude Code's session from pi's history whenever pi's messages move underneath it — after an abort, `/compact`, tree navigation, or an API error. Measured over this repo's own bridge log, a rebuild boundary loses the prompt cache roughly 58% of the time against 26% for a plain resume, so an abort-heavy session costs noticeably more than a clean one. Aborts alone are 46% of rebuilds.
+
+**Files Claude Code edits are not carried across a rebuild.** CC records the post-edit contents as an `edited_text_file` attachment; those aren't carried, because they hang off a tool-result record rather than a prompt and so have no stable position to restore them to. The edit itself survives — it's in the history as a tool call and its result — so this costs Claude the file snapshot, not the knowledge that it made the change. `@file` expansions *are* carried.

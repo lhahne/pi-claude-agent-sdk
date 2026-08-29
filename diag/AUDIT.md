@@ -215,7 +215,9 @@ Classified out as benign: idle > 5 min (88), effort changed (30), model change
 
 ### Finding: ~25% of `--resume` boundaries re-send the whole conversation
 
-The one finding here that neither known bug explains.
+The one finding here that neither known bug explains. Superseded in part: most of
+these are system-prompt changes, not conversation re-sends — see "Git-status
+transitions" below.
 
 Confirmed independently of the pair math, by bucketing the first `usage:` line
 after every `provider: fresh query … resume=<id>`:
@@ -245,40 +247,44 @@ re-cached 150 s after the previous turn, `path=reuse` (the bridge did not rewrit
 the session at all).
 
 Localization: among the 169 sub-5-minute failures, 43% have `cacheRead` exactly
-equal to that pi process's *first*-request `cacheRead` — the system+tools preamble
-(commonly 6,599 tokens) survives and divergence begins at the first conversation
-message. A further 39% cache nothing at all (`cacheRead=0`), implicating the
-preamble too. Break rate is flat across prefix sizes (<20k through >200k) and
-across models, so it is not a large-context or model-specific effect.
+equal to that pi process's *first*-request `cacheRead` (commonly 6,599 tokens).
+A further 39% cache nothing at all (`cacheRead=0`). Break rate is flat across
+prefix sizes (<20k through >200k) and across models, so it is not a large-context
+or model-specific effect.
 
-#### It correlates with how many records CC appended during the previous query
+**Corrected reading of that 43%.** It was first read as "the system+tools preamble
+survives, so divergence begins at the first conversation message", which pointed
+away from the system prompt. That is backwards. The prefix is ordered
+`tools → system[0..2] → messages`, and the constant is the **tools** prefix alone,
+so `cacheRead == constant` means the tool schemas survived and **the system prompt
+changed**. The 39% `cacheRead=0` bucket is the one that does not implicate the
+system prompt — it is a tool-set change or a total eviction.
 
-Every bridge turn crosses a `--resume` boundary, and during the *previous* query
-Claude Code appends its own live records to the session file — one per content
-block, one per tool result. On the next resume CC reads those back and rebuilds
-the API messages from them. If that disk round-trip is not byte-faithful, the
-prefix diverges exactly where the conversation starts, which is the
-`cacheRead == preamble` signature above.
+Two independent confirmations. Clean starts (`resume=none msgs=1`, where there is
+no conversation to read back) land on exactly the same constants — 6,599 / 7,314 /
+7,315 / 7,336 at `tools=11`, 7,976 at `tools=15` — and the constant does not move
+while the prompt grows from 145k to 445k tokens. And `diag/probe-git-cache.mjs`
+reproduces the truncation live: on a bridge-shaped request a git-status change
+drops `cacheRead` from 26,941 to 11,754, the tools prefix, rather than to zero.
 
-Splitting the sub-5-minute, same-model boundaries by what the previous query did
-(n=263, 59 cold):
+#### Withdrawn: the correlation with CC's appended-record count
 
-```
-previous query was TEXT-ONLY (no tool calls)   n=118   cold  11   9.3%
-previous query made tool calls                 n=145   cold  48  33.1%
+A table here split boundaries by the previous query's tool-call count and reported a
+monotone dose-response, read as support for the re-serialization hypothesis. It was
+computed with the metric's false-positive mode, which counted a request's uncached
+`input` as if the next request had to read it back — inflating precisely the
+tool-heavy boundaries it was being used to explain. Withdrawn; recompute from
+scratch rather than adjusting the old figures, which are in git history.
 
-by tool-call count in the previous query:
-   0        n=118   cold 11    9.3%
-   1-2      n= 69   cold 13   18.8%
-   3-9      n= 57   cold 24   42.1%
-   10+      n= 19   cold 11   57.9%
-```
-
-Monotone dose-response: the more records CC wrote during the previous query, the
-likelier the next resume is cold. That supports the re-serialization hypothesis and
-turns the next step from a general hunt into "diff what CC sent live against what it
-reloads". The residual matters too — text-only predecessors are still cold 9.3% of
-the time against a 0.6% control — so record round-tripping is not the whole story.
+The hypothesis itself is untouched and still worth testing: every bridge turn
+crosses a `--resume` boundary, CC appends its own records during the previous query
+(one per content block, one per tool result), and if that disk round-trip is not
+byte-faithful the prefix diverges exactly where the conversation starts. Note that
+its signature is `cacheRead == tools + system`, not the tools-only constant, which
+belongs to the system prompt. Calibrating the tools prefix per module from its
+commit-spanning breaks (24 modules, 268 boundaries), 83 breaks land exactly on it
+and 15 land elsewhere, so re-serialization can account for at most ~15% of
+residual boundary breaks.
 
 **Thinking blocks are untested, not exonerated.** The obvious log-side proxy does
 not exist: `reasoning=` appears in **0** of 14,994 `usage:` lines, so the SDK never
@@ -318,18 +324,9 @@ literal diff file is strictly more expensive — it additionally requires
 `changes.buildPrevDiffableContent`, set only when a previous snapshot exists — so
 grep the reason string first and only chase the diff if it is ambiguous.
 
-**The request-body capture is built and works** — `diag/capture-proxy.mjs` plus
-`diag/diff-captures.mjs`:
-
-```
-node diag/capture-proxy.mjs --out /tmp/cap &
-ANTHROPIC_BASE_URL=http://127.0.0.1:8787 pi --model claude-bridge/claude-haiku-4-5
-node diag/diff-captures.mjs /tmp/cap
-```
-
-Subscription OAuth forwards through a custom base URL, so no API key is needed —
-that caveat is settled. Treat the capture dir as sensitive: it holds whole
-conversations. (Authorization headers are forwarded but never written.)
+**The request-body capture is built and works** — see `diag/capture-proxy.mjs` for
+invocation and for how the capture dir must be handled. Subscription OAuth forwards
+through a custom base URL, so no API key is needed; that caveat is settled.
 
 ### The metric had a false-positive mode; fixed, and the corpus number survives
 
@@ -353,10 +350,31 @@ corpus finding is not an artifact — but it also has not been reproduced.**
 
 33 bridge-free boundaries (`claude -p … --resume`, CC's own session file and tools,
 one process per turn) at 45–85k prompts on Haiku: **0 cold** under the corrected
-metric. Reads land within 10 tokens of expectation every time. The audited failures
-are `claude-opus-5[1m]` at `xhigh` with 100–400k prompts and total collapse — a
-regime none of these runs approached — so leave `diag/capture-proxy.mjs` on during
-a real session of that shape rather than paying to synthesize one.
+metric. Reads land within 10 tokens of expectation every time.
+
+A second control, this time *through* the bridge: 15 `int-cache.sh` runs under the
+capture proxy, **0 of 90 boundaries cold**. Each run is 5 prompts over ~13k prompt
+tokens on Haiku with 2 tool calls, and every boundary reads back `cacheRead +
+cacheWrite` to within ~70 tokens. Runs 2–15 also open fully warm (12283 read / 0
+write) off run 1's prefix, so a resume attaching to an earlier *conversation's*
+cache entry is not sufficient to break it either.
+
+The audited failures are `claude-opus-5[1m]` at `xhigh` with 100–400k prompts and
+total collapse — a regime neither control approaches — so leave
+`diag/capture-proxy.mjs` on during a real session of that shape rather than paying
+to synthesize one.
+
+One cold boundary was observed outside the proxy and has not recurred: `int-cache.sh`
+as stage 4 of `npm test`, turn 7 reading 0 and writing 13042 at a reuse boundary.
+What distinguishes it from all 16 clean runs is turn 1's attach — 8309 read / 3976
+write, a *partial* attach to the prefix left by the smoke and multi-turn stages,
+against 12283 read / 0 write when the run is looped against itself. Looping
+`int-cache.sh` alone cannot recreate that state; the chain has to run.
+
+Note when reading a cold capture: `system[0]` carries CC's per-request billing
+header (`cch=<hash>`), which changes every request, so `diff-captures.mjs` reports a
+divergence at element 0 on **every** boundary, warm or cold. It is cacheable and
+benign. Look past it to the first divergence that matters.
 
 ### Confirmed instead: CC's resume reorders same-millisecond tool_results
 
@@ -433,6 +451,81 @@ Evidence needed to make that case, and where it now stands:
 
 The one upstream report that *is* ready is unrelated to caching: the reordering of
 same-millisecond parallel `tool_result` blocks on resume.
+
+### Finding: git-status transitions change the system prompt and truncate the read
+
+CC's `claude_code` preset ends with a `gitStatus:` block (`git status --short`
+plus `git log --oneline -n 5`) inside `system[2]`, which carries `cache_control
+ephemeral 1h`. Native CC computes it once per process; the bridge re-invokes CC
+per turn, so it is recomputed every turn and tracks the current working tree.
+
+`diag/probe-git-cache.mjs` pins the mechanism live against CC 2.1.141 / SDK
+0.2.141. Editing a file already listed dirty leaves `system[2]` byte-identical and
+hits fully; a status *transition* diverges inside the git block and truncates the
+read to the tools prefix. Confirmed for a new untracked path, `git add`
+(`' M'` → `'M '`), and a new commit. `system[0]` carries a per-request
+`x-anthropic-billing-header` with no `cache_control` and is ignored by the cache
+key — exclude it when diffing, or every pair looks divergent.
+
+#### Rate and cost
+
+Denominator is `--resume` boundary pairs after the standard exclusions (idle >5
+min, model change, effort change, tool-set change, compaction/reset, clean start,
+rebuild):
+
+```
+boundary pairs (strict)              1025
+system-prompt breaks                  173    16.9%
+in-query control (same rule)     43/12844     0.3%   <- system prompt is fixed for a query's lifetime
+```
+
+173 breaks re-cached **25.6M tokens** over 2026-04-09 → 2026-08-24; median 118k
+per event, p90 330k, max 516k. On the 631 boundaries where the working directory
+is recoverable the rate is 24.2%.
+
+#### The commit-spanning test
+
+Commits are the one transition with an independently recorded timestamp, so they
+can be joined against the log. A boundary "spans a commit" when the previous
+query's window contains a commit in that session's repo:
+
+```
+             sys-break   clean
+spans commit      52       14     78.8%
+no commit        101      464     17.9%
+odds ratio 17.1     Fisher two-tailed p = 2.5e-23
+```
+
+Controls: a placebo window shifted −24 h gives OR 2.9, so activity clustering is
+real but an order of magnitude smaller. The effect holds in every previous-query
+duration bin (`<60s` 50% vs 3.4% through `>10m` 85.7% vs 46.7%) and every prefix
+size bin (`<50k` 44% vs 9% through `>250k` 91% vs 25%). Single-repo natural
+experiment, one pi process `ya6eny` on 2026-08-12: 16 of 18 commit-spanning
+boundaries dropped to exactly 7,976, 0 of 54 non-spanning ones did, and every
+non-spanning boundary read 98–100%.
+
+Attributable to commits alone (excess over the non-spanning baseline): 40 events,
+**8.7M tokens**. A floor, since `git add`, new untracked files and branch switches
+are equally fatal and leave no recoverable timestamp.
+
+#### Caveats
+
+- **Whether this predates July 2026 is undetermined.** Monthly rate: Apr 6.4%
+  (n=157), May 10.4% (48), Jun 6.5% (46), Jul 24.3% (259), Aug 17.9% (515). Only
+  2 commit-spanning boundaries with a resolved repo exist before July, so the jump
+  could be a CC version change, a usage-pattern change, or improving cwd coverage.
+- `500eea19` does **not** split the corpus; it changed the AskClaude path only.
+  The provider path has passed `preset: "claude_code"` since 2026-04-02, before
+  the log opens (`git log -S`).
+- The non-commit portion is not decomposable: the 15.4% non-spanning on-prefix
+  break rate mixes untracked files, staging, branch switches, date rollover,
+  CLAUDE.md edits, and commits the scan missed. The commit test isolates git for
+  at least 26% of system-prompt breaks; the rest is unattributed.
+- cwd is unrecoverable for 38% of boundaries (394/1025), mostly early sessions
+  that never logged a rebuild.
+- `git log --all` may count commits on non-HEAD branches or rebase-rewritten
+  dates as spanning, which biases toward the null — the true effect is if
+  anything stronger.
 
 ---
 

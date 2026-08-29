@@ -1,9 +1,19 @@
 # Changelog
 
+## UNRELEASED
+
+- **Fix: git-status changes no longer bust the prompt cache (issue #73)** — the `claude_code` preset embeds a git-status snapshot in the cached system block, so any git transition rewrote the whole conversation prefix at cache-write rates. The provider path now sets `includeGitInstructions: false`, stripping the block with no other cost.
+- **Fix: an exhausted Claude subscription never triggered fallback models (issue #58)** — a failure preceded by a rate-limit rejection is now labelled as one, with its limit type and reset time. Rate-limit warnings show true percentages (the SDK reports utilization as a fraction), skip a 1970 reset time, and only re-notify when usage rises past a new 5% step. The labelled error is consumed with the failure that caused it, so a later unrelated error is not also tagged as a rate limit.
+- **Fix: system prompt loading** — Claude Code no longer loads its own `CLAUDE.md` (`claudeMdExcludes`); context files and skills come from pi. `provider.appendSystemPrompt` / `provider.settingSources` are gone. An unaccountable system prompt now fails loudly instead of silently dropping instructions, and a sub-agent cannot clobber its parent's captured prompt.
+- **Fix: branch summarization ran through the live provider** — rewinding or forking with "summarize" now takes over `session_before_tree` the way `/compact` already takes over `session_before_compact`.
+- **Fix: `@file` mentions were lost when a session was rebuilt** — Claude Code expansions are now carried across. Requires cc-session-io `^0.4.0`. Empty aborted turns are dropped instead of standing in as `[incompatible content omitted]`, and conversion logs what it discarded.
+- **Fix: bogus "record count mismatch" after switching providers** — the post-rebuild integrity check now accounts for `@file` expansion.
+- **Fix: unparseable `claude-bridge.json` is left alone** — recording the startup notice no longer overwrites a config that does not parse.
+- **Bump: cc-session-io ^0.4.0, pi 0.83.0** — `@anthropic-ai/sdk` moves to devDependencies (types only).
+
 ## 0.8.1 — 2026-08-06
 
 - **Fix: default plan is Max; brand notices as pi-claude-agent-sdk** — `provider.plan` now defaults to `"max"` so Max subscribers get Opus 4.6 at 1M without config. The one-time notice tells Pro users to set `"pro"`. User-facing notifications use the package name instead of "Claude bridge".
-
 
 ## 0.8.0 — 2026-08-06
 
