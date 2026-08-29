@@ -1,6 +1,6 @@
 # Changelog
 
-## UNRELEASED
+## 0.8.2 — 2026-08-28
 
 - **Fix: git-status changes no longer bust the prompt cache (issue #73)** — the `claude_code` preset embeds a git-status snapshot in the cached system block, so any git transition rewrote the whole conversation prefix at cache-write rates. The provider path now sets `includeGitInstructions: false`, stripping the block with no other cost.
 - **Fix: an exhausted Claude subscription never triggered fallback models (issue #58)** — a failure preceded by a rate-limit rejection is now labelled as one, with its limit type and reset time. Rate-limit warnings show true percentages (the SDK reports utilization as a fraction), skip a 1970 reset time, and only re-notify when usage rises past a new 5% step. The labelled error is consumed with the failure that caused it, so a later unrelated error is not also tagged as a rate limit.
