@@ -1,6 +1,6 @@
 # Changelog
 
-## UNRELEASED
+## 0.8.3 — 2026-09-01
 
 - **Fix: first turn failed when the package was installed at both user and project scope** — pi's pre-trust pass loads the user copy (which registers the provider); the post-trust pass then loads the project copy and drops the first copy's `before_agent_start` handler. Captures were per-module, so the live stream saw an empty table and threw "0 known". The capture table is now process-wide, like the stream registration guard.
 
