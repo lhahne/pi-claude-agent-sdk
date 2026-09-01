@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
-import { describe, it } from "node:test";
+import { after, before, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { collectPromptSkills, projectPromptCapture, PromptCaptures } from "../src/prompt-capture.js";
+import { collectPromptSkills, getSharedPromptCaptures, projectPromptCapture, PROMPT_CAPTURES_KEY, PromptCaptures } from "../src/prompt-capture.js";
 
 const PI_HARNESS = "You are an expert coding assistant operating inside pi. Pi documentation: pi packages (docs/packages.md).";
 const PARENT_KEY = `${PI_HARNESS}\n\n<project_context>raw parent context</project_context>\nCurrent working directory: /parent`;
@@ -108,10 +108,19 @@ describe("PromptCaptures", () => {
 
 		assert.throws(
 			() => captures.resolveOrDerive("a prompt sharing nothing with what we recorded"),
-			/no capture for this .* system prompt/,
+			(err) => /no capture for this .* system prompt/.test(err.message)
+				&& !/another package root/.test(err.message),
 		);
 		// No prompt at all is not a loss — there is nothing to forward.
 		assert.equal(captures.resolveOrDerive(undefined), undefined);
+	});
+
+	it("names a duplicate package root when nothing was ever recorded", () => {
+		const captures = new PromptCaptures();
+		assert.throws(
+			() => captures.resolveOrDerive("unrecorded"),
+			/second copy of this extension loaded from another package root/,
+		);
 	});
 
 	it("reports the closest known capture when a prompt matches nothing", () => {
@@ -257,5 +266,48 @@ describe("PromptCaptures", () => {
 		assert.equal(captures.resolve("b"), undefined);
 		assert.equal(captures.resolve("a").custom, "refreshed");
 		assert.ok(captures.resolve("c") && captures.resolve("d"));
+	});
+});
+
+describe("getSharedPromptCaptures", () => {
+	let previous;
+
+	before(() => {
+		previous = globalThis[PROMPT_CAPTURES_KEY];
+	});
+	beforeEach(() => {
+		delete globalThis[PROMPT_CAPTURES_KEY];
+	});
+	after(() => {
+		if (previous === undefined) delete globalThis[PROMPT_CAPTURES_KEY];
+		else globalThis[PROMPT_CAPTURES_KEY] = previous;
+	});
+
+	it("reuses the first table so a later copy records where the first stream reads", () => {
+		let created = 0;
+		const first = getSharedPromptCaptures(() => {
+			created++;
+			return new PromptCaptures();
+		});
+		first.record("shared-key", capture({ custom: "from first copy" }));
+
+		const second = getSharedPromptCaptures(() => {
+			created++;
+			return new PromptCaptures();
+		});
+
+		assert.equal(created, 1);
+		assert.equal(second, first);
+		assert.equal(second.resolve("shared-key").custom, "from first copy");
+	});
+
+	it("does not replace a table stored by another copy of this module", () => {
+		// Another package root evaluates a different PromptCaptures class. instanceof
+		// would fail; the stored object must still win so the first copy's stream
+		// keeps seeing what later before_agent_start handlers record.
+		const foreign = { resolve() { return "foreign"; } };
+		globalThis[PROMPT_CAPTURES_KEY] = foreign;
+		const got = getSharedPromptCaptures(() => new PromptCaptures());
+		assert.equal(got, foreign);
 	});
 });

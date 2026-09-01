@@ -17,6 +17,7 @@ import { QueryContext, ctx } from "./query-state.js";
 import { makePromptStream, userMessage, type PromptStream } from "./prompt-stream.js";
 import { claudeCodeSettings, loadConfig, markStartupNoticeShown, type Config } from "./config.js";
 import {
+	getSharedPromptCaptures,
 	projectPromptCapture,
 	PromptCaptures,
 } from "./prompt-capture.js";
@@ -133,6 +134,10 @@ function diagDump(label: string, data: Record<string, unknown>) {
 //
 // On session_shutdown (including /reload), clearSession() resets this so a fresh
 // registration can occur for the next session.
+//
+// The prompt-capture table is shared the same way (PROMPT_CAPTURES_KEY): skipping
+// re-registration is not enough when the first copy's before_agent_start handler
+// is dropped and a second copy records into a different Map.
 const ACTIVE_STREAM_SIMPLE_KEY = Symbol.for("claude-bridge:activeStreamSimple");
 
 // MODELS is buildModels(getModels("anthropic")) — projection kept in models.js.
@@ -790,8 +795,10 @@ function showStartupNoticeOnce(): void {
 }
 
 // Captures of what pi assembled per agent; see src/prompt-capture.ts for why this
-// is keyed rather than held in a single slot.
-const promptCaptures = new PromptCaptures(256, (diagnostic) => {
+// is keyed rather than held in a single slot. Process-wide: a second evaluation
+// of this module (user vs project package root, or a subagent) must record into
+// the same table the first evaluation's streamSimple reads.
+const promptCaptures = getSharedPromptCaptures(() => new PromptCaptures(256, (diagnostic) => {
 	const first = diagnostic.matches[0];
 	debug(
 		`prompt-capture: no match for ${diagnostic.systemPrompt.length}-char system prompt. `
@@ -801,7 +808,7 @@ const promptCaptures = new PromptCaptures(256, (diagnostic) => {
 			: "no known captures to compare against."
 		) + ` known keys=${diagnostic.matches.length}`,
 	);
-});
+}));
 
 /** Whatever a settled session left behind, named in one greppable line.
  *

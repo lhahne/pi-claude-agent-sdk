@@ -1,5 +1,9 @@
 # Changelog
 
+## UNRELEASED
+
+- **Fix: first turn failed when the package was installed at both user and project scope** — pi's pre-trust pass loads the user copy (which registers the provider); the post-trust pass then loads the project copy and drops the first copy's `before_agent_start` handler. Captures were per-module, so the live stream saw an empty table and threw "0 known". The capture table is now process-wide, like the stream registration guard.
+
 ## 0.8.2 — 2026-08-28
 
 - **Fix: git-status changes no longer bust the prompt cache (issue #73)** — the `claude_code` preset embeds a git-status snapshot in the cached system block, so any git transition rewrote the whole conversation prefix at cache-write rates. The provider path now sets `includeGitInstructions: false`, stripping the block with no other cost.

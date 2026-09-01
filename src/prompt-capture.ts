@@ -162,7 +162,10 @@ export class PromptCaptures {
 				+ `Claude Code would receive none of this turn's context files, skills or custom instructions. `
 				+ `The usual cause is an extension loaded after claude-bridge that rewrites the system prompt from before_agent_start — `
 				+ `one that wraps it is fine, one that rebuilds or strips it leaves nothing to match. `
-				+ `(Also possible: pi rebuilt the prompt outside before_agent_start — a late-registered tool or fresh resource discovery.)`,
+				+ `(Also possible: pi rebuilt the prompt outside before_agent_start — a late-registered tool or fresh resource discovery.)`
+				+ (this.captures.size === 0
+					? ` Zero known also means before_agent_start never recorded into this table — often a second copy of this extension loaded from another package root after the first registered the provider.`
+					: ""),
 			);
 		}
 
@@ -230,6 +233,30 @@ export class PromptCaptures {
 		for (const capture of this.captures.values()) visit(capture);
 		return result;
 	}
+}
+
+/** Process-wide slot for the capture table.
+ *
+ *  `src/index.ts` is evaluated once per package root. Pi's pre-trust pass loads
+ *  the user install, which registers the provider; the post-trust pass then
+ *  loads the project install as a different module and drops the first copy's
+ *  event handlers. A per-module Map means `before_agent_start` records into a
+ *  table the live `streamSimple` never reads.
+ *
+ *  Symbol.for shares one table across those evaluations, the same way
+ *  `ACTIVE_STREAM_SIMPLE_KEY` shares the stream. Do not use `instanceof
+ *  PromptCaptures` to recognize the stored value: two package roots evaluate
+ *  two copies of the class, so a cross-realm check would replace the table
+ *  the first copy's stream already closed over. */
+export const PROMPT_CAPTURES_KEY = Symbol.for("claude-bridge:promptCaptures");
+
+export function getSharedPromptCaptures(create: () => PromptCaptures): PromptCaptures {
+	const g = globalThis as Record<symbol, unknown>;
+	const existing = g[PROMPT_CAPTURES_KEY];
+	if (existing) return existing as PromptCaptures;
+	const created = create();
+	g[PROMPT_CAPTURES_KEY] = created;
+	return created;
 }
 
 export function projectPromptCapture(
