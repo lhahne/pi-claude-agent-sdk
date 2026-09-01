@@ -132,13 +132,10 @@ try {
 	assert(thresholdEnds.length === 1, `second threshold compaction_end fired (${thresholdEnds.length} total)`);
 
 	const debugLog = readFileSync(DEBUG_LOG, "utf8");
-	assert(/session_before_compact: takeover/.test(debugLog), "debug log missing compact takeover marker");
-	assert(
-		/session_before_compact: takeover complete summaryLen=/.test(debugLog),
-		"debug log missing compact takeover completion marker",
-	);
-	const compactSpawns = [...debugLog.matchAll(/compact summary: spawn/g)].length;
-	assert(compactSpawns >= 2, `expected at least 2 isolated compact summary spawns, got ${compactSpawns}`);
+	const standaloneRoutes = [...debugLog.matchAll(/routing standalone cacheRetention=none request to isolated subprocess/g)].length;
+	assert(standaloneRoutes >= 2, `expected at least 2 standalone summary routes, got ${standaloneRoutes}`);
+	const standaloneSpawns = [...debugLog.matchAll(/standalone: spawn/g)].length;
+	assert(standaloneSpawns >= 2, `expected at least 2 standalone summary spawns, got ${standaloneSpawns}`);
 	assert(!/currentPiStream overwritten/.test(debugLog), "debug log reported currentPiStream overwrite");
 
 	console.log(`  summary:      ${endEvent.result.summary.slice(0, 80).replace(/\n/g, " ")}...`);

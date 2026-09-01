@@ -35,7 +35,7 @@ const errorResult = {
 	terminal_reason: "model_error",
 };
 
-// Shared by the provider turn and the isolated compact summary — the summary path used to
+// Shared by the provider turn and standalone requests — the summary path used to
 // accept an errored result as a valid summary, writing "Prompt is too long" into history.
 describe("resultErrorText", () => {
 	it("treats is_error on a success-shaped result as a failure", () => {

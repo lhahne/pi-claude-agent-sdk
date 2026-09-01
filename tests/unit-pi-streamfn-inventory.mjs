@@ -16,9 +16,8 @@
  * the same reason AGENTS.md distrusts claude-code-rip.
  *
  * If this fails: a pi upgrade added or moved a streamFn consumer. Work out
- * whether it can reach a bridge model, and either handle it (the way
- * `session_before_compact` and `session_before_tree` are taken over) or add it
- * below with a note on why it is harmless.
+ * whether it can reach a bridge model and whether it marks the call as a
+ * standalone `cacheRetention: "none"` request before accounting for it below.
  */
 
 import { describe, it } from "node:test";
@@ -39,8 +38,8 @@ const PI_DIST = fileURLToPath(new URL("../node_modules/@earendil-works/pi-coding
 const HANDLED = {
 	"agent-session.js": { mentions: 1, why: "the one hand-off: `streamFn: this.agent.streamFunction` into generateBranchSummary" },
 	"sdk.js": { mentions: 2, why: "constructs the agent, does not summarize" },
-	"compaction/compaction.js": { mentions: 13, why: "taken over via session_before_compact -> isolatedStreamFn" },
-	"compaction/branch-summarization.js": { mentions: 2, why: "taken over via session_before_tree -> isolatedStreamFn" },
+	"compaction/compaction.js": { mentions: 13, why: "completeSummarization marks calls cacheRetention=none, routed to a standalone subprocess" },
+	"compaction/branch-summarization.js": { mentions: 2, why: "uses completeSummarization's cacheRetention=none standalone route" },
 };
 
 const mentionsOf = (text) => (text.match(/streamFn/g) ?? []).length;
@@ -73,7 +72,7 @@ describe("pi streamFn consumers", () => {
 			+ `Each can route an LLM call through our provider with a system prompt no before_agent_start recorded.`,
 		);
 
-		// If one of these disappears, the takeover it justifies is now dead code.
+		// If one of these disappears, its routing justification may now be dead.
 		const missing = Object.keys(HANDLED).filter((rel) => !found.has(rel));
 		assert.deepEqual(missing, [], `these no longer consume streamFn — is the takeover still needed? ${missing.join(", ")}`);
 

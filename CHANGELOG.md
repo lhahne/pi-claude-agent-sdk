@@ -1,5 +1,9 @@
 # Changelog
 
+## UNRELEASED
+
+- **Fix: standalone extension completions no longer fail prompt capture** — tool-free one-shot `modelRegistry.complete()` calls marked no-cache, including pi-verbatim-compaction's planner, run in isolated Claude Code subprocesses with their supplied system prompt and never touch the resumable chat session. Pi compaction and branch summaries use the same route, replacing the competing event takeovers that caused duplicate summary calls when another compaction extension was installed.
+
 ## 0.8.5 — 2026-09-01
 
 - **Bump: @anthropic-ai/claude-agent-sdk ^0.3.257** — bundled Claude Code 2.1.257, which accepts Fable 5.1. `@anthropic-ai/sdk` (types) moves to ^0.93.0 to match the SDK peer. If a model again outruns the bundle, the bridge still falls back to a current `claude` on PATH (or `provider.pathToClaudeCodeExecutable`) instead of repeating Claude Code's 400.

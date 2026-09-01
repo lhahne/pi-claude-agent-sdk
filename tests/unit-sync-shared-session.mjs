@@ -20,8 +20,8 @@ describe("syncSharedSession", () => {
 	// The branch this exercises is the guard that stops a reentrant subagent from
 	// resuming — and then overwriting — the parent's session: a subagent's context
 	// is shorter than the parent's cursor, so it starts fresh and the parent's
-	// session is preserved. It was previously described here as the compact-summary
-	// path, which cannot reach syncSharedSession at all, so the branch read as
+	// session is preserved. It was previously described here as the standalone
+	// summary path, which cannot reach syncSharedSession at all, so the branch read as
 	// covered for a case that never happens.
 	it("starts a fresh session for a shorter context and preserves the parent's", () => {
 		const cwd = mkdtempSync(join(tmpdir(), "sync-shared-session-"));

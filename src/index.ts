@@ -1,7 +1,7 @@
 import { calculateCost, type AssistantMessage, type AssistantMessageEventStream, type Context, type ImageContent, type Model, type SimpleStreamOptions, type TextContent, type Tool, type UserMessage } from "@earendil-works/pi-ai";
 import * as piAi from "@earendil-works/pi-ai";
 import { getModels } from "@earendil-works/pi-ai/compat";
-import { compact, generateBranchSummary, type BranchSummaryResult, type CompactionEntry, type ExtensionAPI, type ExtensionContext, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI, type ExtensionContext, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { query, type EffortLevel, type SDKMessage, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
 import type { Base64ImageSource, ContentBlockParam } from "@anthropic-ai/sdk/resources";
 import { createSession, deleteSession, openSession, repairToolPairing } from "cc-session-io";
@@ -366,16 +366,31 @@ function newAssistantOutput(model: Model<any>, text: string, stopReason: Assista
 	};
 }
 
-function extractIsolatedSummaryPrompt(messages: Context["messages"]): string {
+function extractStandalonePrompt(context: Context): string {
+	if (context.tools?.length) {
+		throw new Error(`standalone provider requests do not support tools (got ${context.tools.length})`);
+	}
+	const messages = context.messages;
 	if (messages.length !== 1 || messages[0].role !== "user") {
 		throw new Error(
-			`isolatedStreamFn: expected exactly 1 user message, got ${messages.length} ` +
+			`standalone provider request expected exactly 1 user message, got ${messages.length} ` +
 			`(${messages.map((m) => m.role).join(",")})`,
 		);
 	}
 	const promptText = extractUserPrompt(messages);
-	if (!promptText) throw new Error("isolatedStreamFn: summarization prompt is empty");
+	if (!promptText) throw new Error("standalone provider request prompt is empty");
 	return promptText;
+}
+
+/** Pi marks summaries and extension-owned nested completions as no-cache,
+ * standalone requests. They must never enter the resumable provider path: its
+ * prompt capture and shared Claude Code session belong to the interactive
+ * agent, not to an unrelated planner or summarizer. */
+function isStandaloneRequest(context: Context, options?: SimpleStreamOptions): boolean {
+	return options?.cacheRetention === "none"
+		&& context.tools === undefined
+		&& context.messages.length === 1
+		&& context.messages[0]?.role === "user";
 }
 
 /** Failure text for an SDK result, or undefined when it succeeded. CC reports API failures
@@ -407,13 +422,13 @@ function describeRateLimitFailure(rejection: { rateLimitType?: string; resetsAt?
 	return `Claude rate limit${kind}${resets}: ${failure}`;
 }
 
-function isolatedStreamFn(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
+function standaloneStreamFn(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
 	const stream = newAssistantMessageEventStream();
-	void runIsolatedSummary(model, context, options, stream);
+	void runStandaloneRequest(model, context, options, stream);
 	return stream;
 }
 
-async function runIsolatedSummary(
+async function runStandaloneRequest(
 	model: Model<any>,
 	context: Context,
 	options: SimpleStreamOptions | undefined,
@@ -428,14 +443,20 @@ async function runIsolatedSummary(
 	};
 
 	try {
-		const promptText = extractIsolatedSummaryPrompt(context.messages);
+		const promptText = extractStandalonePrompt(context);
 		const cwd = (options as { cwd?: string } | undefined)?.cwd ?? process.cwd();
-		const compactProviderSettings = loadConfig(cwd).provider;
-		const claudeExecutableResolution = resolveClaudeCodeExecutable(model.id, compactProviderSettings?.pathToClaudeCodeExecutable);
+		const standaloneProviderSettings = loadConfig(cwd).provider;
+		const claudeExecutableResolution = resolveClaudeCodeExecutable(model.id, standaloneProviderSettings?.pathToClaudeCodeExecutable);
 		if (claudeExecutableResolution.error) throw new Error(claudeExecutableResolution.error);
 		const claudeExecutable = claudeExecutableResolution.path;
 		const cliModel = claudeCodeModelId(model, longContextSettings);
-		debug(`compact summary: spawn model=${cliModel} registeredModel=${model.id} promptLen=${promptText.length}`);
+		const effort = options?.reasoning
+			? ((model as any).thinkingLevelMap?.[options.reasoning] as EffortLevel | undefined)
+				?? REASONING_TO_EFFORT[options.reasoning]
+			: undefined;
+		const extraArgs: Record<string, string | null> = {};
+		if (effort || adaptiveThinkingAlwaysOn(model.id)) extraArgs["thinking-display"] = "summarized";
+		debug(`standalone: spawn model=${cliModel} registeredModel=${model.id} promptLen=${promptText.length} effort=${effort ?? "default"}`);
 		const childEnv = await resolveClaudeChildEnv(piModelRegistry);
 
 		sdkQuery = query({
@@ -452,8 +473,10 @@ async function runIsolatedSummary(
 				systemPrompt: context.systemPrompt,
 				model: cliModel,
 				maxTurns: 1,
+				extraArgs,
+				...(effort ? { effort } : {}),
 				...(claudeExecutable ? { pathToClaudeCodeExecutable: claudeExecutable } : {}),
-				...makeCliDebugOptions("compact-summary"),
+				...makeCliDebugOptions("standalone"),
 			},
 		});
 
@@ -465,11 +488,12 @@ async function runIsolatedSummary(
 		let assistantText = "";
 		let finalText = "";
 		let errorText: string | undefined;
+		let resultUsage: Record<string, number | undefined> | undefined;
 		let firstEventLogged = false;
 
 		for await (const message of sdkQuery) {
 			if (!firstEventLogged) {
-				debug(`compact summary: first event type=${message.type}`);
+				debug(`standalone: first event type=${message.type}`);
 				firstEventLogged = true;
 			}
 			if (wasAborted) break;
@@ -479,15 +503,16 @@ async function runIsolatedSummary(
 					if (block.type === "text" && typeof block.text === "string") assistantText += block.text;
 				}
 			} else if (message.type === "result") {
-				logServedContextWindow("compact summary", message, model);
+				logServedContextWindow("standalone", message, model);
 				errorText = resultErrorText(message);
+				resultUsage = (message as SDKMessage & { usage?: Record<string, number | undefined> }).usage;
 				if (!errorText && message.subtype === "success") finalText = message.result || assistantText;
 			}
 		}
 
 		if (wasAborted) {
 			const output = newAssistantOutput(model, "", "aborted", "Operation aborted");
-			debug("compact summary: aborted");
+			debug("standalone: aborted");
 			stream.push({ type: "error", reason: "aborted", error: output });
 			stream.end();
 			return;
@@ -495,36 +520,27 @@ async function runIsolatedSummary(
 
 		const text = finalText || assistantText;
 		if (errorText || !text.trim()) {
-			const msg = errorText ?? "Claude Code summary returned empty text";
-			debug(`compact summary: error ${msg}`);
+			const msg = errorText ?? "Claude Code standalone request returned empty text";
+			debug(`standalone: error ${msg}`);
 			stream.push({ type: "error", reason: "error", error: newAssistantOutput(model, "", "error", msg) });
 			stream.end();
 			return;
 		}
 
-		debug(`compact summary: done textLen=${text.length}`);
-		stream.push({ type: "done", reason: "stop", message: newAssistantOutput(model, text, "stop") });
+		const output = newAssistantOutput(model, text, "stop");
+		if (resultUsage) updateUsage(output, resultUsage, model);
+		debug(`standalone: done textLen=${text.length}`);
+		stream.push({ type: "done", reason: "stop", message: output });
 		stream.end();
 	} catch (err) {
 		const msg = errorMessage(err);
-		debug("runIsolatedSummary threw; pushing terminal error", err);
+		debug("runStandaloneRequest threw; pushing terminal error", err);
 		stream.push({ type: "error", reason: "error", error: newAssistantOutput(model, "", "error", msg) });
 		stream.end();
 	} finally {
 		options?.signal?.removeEventListener("abort", onAbort);
 		try { sdkQuery?.close(); } catch {}
 	}
-}
-
-function reinjectPriorCompactionFileOps(branchEntries: Array<{ type: string; details?: unknown }>, preparation: { fileOps: { read: Set<string>; edited: Set<string> } }): void {
-	const prior = [...branchEntries]
-		.reverse()
-		.find((entry): entry is CompactionEntry => entry.type === "compaction");
-	const details = prior?.details as { readFiles?: unknown; modifiedFiles?: unknown } | undefined;
-	if (!Array.isArray(details?.readFiles) || !Array.isArray(details?.modifiedFiles)) return;
-	for (const file of details.readFiles) preparation.fileOps.read.add(String(file));
-	for (const file of details.modifiedFiles) preparation.fileOps.edited.add(String(file));
-	debug(`compact takeover: re-injected prior file ops read=${details.readFiles.length} modified=${details.modifiedFiles.length}`);
 }
 
 interface SyncResult {
@@ -643,8 +659,8 @@ function syncSharedSession(
 	// the completion handler). Remove this branch and a subagent resumes — then
 	// overwrites — the parent's session.
 	//
-	// It is NOT, despite an earlier comment here, the isolated compact-summary
-	// path: runIsolatedSummary never calls syncSharedSession at all.
+	// It is not the standalone no-cache path: runStandaloneRequest never calls
+	// syncSharedSession at all.
 	//
 	// Only reachable when needsRebuild is false — user-facing history rewrites
 	// (/compact, session_tree, /new, fork) always set needsRebuild or clear
@@ -722,7 +738,8 @@ export const __test = {
 	drainForAbort,
 	CC_CHILD_ENV,
 	buildMcpServers,
-	branchSummaryOutcome,
+	isStandaloneRequest,
+	extractStandalonePrompt,
 };
 
 // --- Provider helpers: tool name mapping ---
@@ -831,25 +848,6 @@ function reportLeaks(label: string): void {
 		`WARNING: ${label} left state behind — contexts=${activeQueryContexts.size} `
 		+ `pendingToolCalls=${pendingCalls} promptStreams=${liveStreams}`,
 	);
-}
-
-/** What pi's branch summary means for the navigation it was asked for.
- *
- *  Cancelling on failure matches pi's own path, which rethrows a summary error out
- *  of the navigation rather than moving without one. Separated from the event
- *  handler so this decision is testable without a Claude Code subprocess — driving
- *  `generateBranchSummary` itself would only be testing pi. */
-function branchSummaryOutcome(result: BranchSummaryResult): { cancel: true } | { summary: { summary: string; details: unknown; usage?: BranchSummaryResult["usage"] } } {
-	if (result.aborted) return { cancel: true };
-	if (result.error) throw new Error(result.error);
-	debug(`session_before_tree: takeover complete summaryLen=${result.summary?.length ?? 0}`);
-	return {
-		summary: {
-			summary: result.summary ?? "",
-			details: { readFiles: result.readFiles ?? [], modifiedFiles: result.modifiedFiles ?? [] },
-			usage: result.usage,
-		},
-	};
 }
 
 function contextForToolResults(results: McpResult[]): QueryContext | undefined {
@@ -1424,9 +1422,15 @@ function drainForAbort(c: QueryContext, promptStream: PromptStream): void {
 	c.releasePendingToolCalls("Operation aborted");
 }
 
-/** Provider entry point. Pi calls this for each new prompt and each tool result.
- *  Two cases: tool result delivery (active query) or fresh query. */
+/** Provider entry point. Pi calls this for normal agent turns, but also for
+ * standalone no-cache completions made by compaction and extensions. Route the
+ * latter before touching prompt captures or resumable-session state. */
 function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
+	if (isStandaloneRequest(context, options)) {
+		debug(`provider: routing standalone cacheRetention=none request to isolated subprocess`);
+		return standaloneStreamFn(model, context, options);
+	}
+
 	showStartupNoticeOnce();
 	const stream = newAssistantMessageEventStream();
 
@@ -1828,39 +1832,6 @@ export default function (pi: ExtensionAPI) {
 		clearSession("session_shutdown");
 	});
 
-	pi.on("session_before_compact", async (event, ctx) => {
-		if (ctx.model?.baseUrl !== "claude-bridge") return undefined;
-		debug(
-			`session_before_compact: takeover reason=${event.reason} willRetry=${event.willRetry} ` +
-			`isSplitTurn=${event.preparation.isSplitTurn} messages=${event.preparation.messagesToSummarize.length} ` +
-			`turnPrefix=${event.preparation.turnPrefixMessages.length}`,
-		);
-		try {
-			reinjectPriorCompactionFileOps(event.branchEntries, event.preparation);
-			const compaction = await compact(
-				event.preparation,
-				ctx.model,
-				undefined,
-				undefined,
-				event.customInstructions,
-				event.signal,
-				undefined,
-				isolatedStreamFn,
-				undefined,
-			);
-			debug(`session_before_compact: takeover complete summaryLen=${compaction.summary.length}`);
-			return { compaction };
-		} catch (err) {
-			const msg = errorMessage(err);
-			debug("session_before_compact: takeover failed; cancelling to avoid native compact fallback", err);
-			ctx.ui?.notify?.(
-				`pi-claude-agent-sdk compact failed (${msg}); cancelled to avoid known hang. Retry, switch model, or reduce context.`,
-				"error",
-			);
-			return { cancel: true };
-		}
-	});
-
 	// pi /compact and session-tree navigation (rewind / fork-at-point /
 	// branch switch) both mutate pi's messages array out from under the
 	// bridge. syncSharedSession's REUSE check would otherwise see
@@ -1876,38 +1847,6 @@ export default function (pi: ExtensionAPI) {
 	};
 	pi.on("session_compact", (event) => markRebuild(`session_compact:${event.reason}:willRetry=${event.willRetry}`));
 	pi.on("session_tree", () => markRebuild("session_tree"));
-
-	// Branch summarization — rewind or fork-at-point with "summarize" — is the other
-	// place pi asks the model for a summary, and unlike compaction it runs through
-	// the *agent's* stream function (agent-session passes `streamFn:
-	// this.agent.streamFunction`). On a bridge model that reaches this provider
-	// carrying pi's internal summarization prompt, which no `before_agent_start`
-	// ever recorded, so the prompt-capture resolver has nothing to resolve it to.
-	// Take it over the way compaction is taken over: the summary runs as its own
-	// Claude Code subprocess, never touching the live session or the resolver.
-	pi.on("session_before_tree", async (event, ctx) => {
-		if (ctx.model?.baseUrl !== "claude-bridge") return undefined;
-		const { entriesToSummarize, userWantsSummary, customInstructions, replaceInstructions } = event.preparation;
-		if (!userWantsSummary || entriesToSummarize.length === 0) return undefined;
-		debug(`session_before_tree: takeover entries=${entriesToSummarize.length} target=${event.preparation.targetId.slice(0, 8)}`);
-		try {
-			const result = await generateBranchSummary(entriesToSummarize, {
-				model: ctx.model,
-				signal: event.signal,
-				customInstructions,
-				replaceInstructions,
-				streamFn: isolatedStreamFn,
-			});
-			return branchSummaryOutcome(result);
-		} catch (err) {
-			debug("session_before_tree: takeover failed; cancelling navigation", err);
-			ctx.ui?.notify?.(
-				`pi-claude-agent-sdk branch summary failed (${errorMessage(err)}); navigation cancelled.`,
-				"error",
-			);
-			return { cancel: true };
-		}
-	});
 
 	// --- Provider ---
 	//
