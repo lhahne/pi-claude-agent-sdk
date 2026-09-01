@@ -1,6 +1,6 @@
 # Changelog
 
-## UNRELEASED
+## 0.8.5 — 2026-09-01
 
 - **Bump: @anthropic-ai/claude-agent-sdk ^0.3.257** — bundled Claude Code 2.1.257, which accepts Fable 5.1. `@anthropic-ai/sdk` (types) moves to ^0.93.0 to match the SDK peer. If a model again outruns the bundle, the bridge still falls back to a current `claude` on PATH (or `provider.pathToClaudeCodeExecutable`) instead of repeating Claude Code's 400.
 
