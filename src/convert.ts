@@ -116,10 +116,16 @@ export type DroppedContent = {
 	other: Map<string, number>;
 };
 
-/** Convert pi message array to Anthropic API format. */
+/** Convert pi message array to Anthropic API format.
+ *
+ *  `dropThinking` strips every thinking block, including ones we minted. Fable 5.1
+ *  binds thinking to the conversation prefix, so a rebuild that keeps the blocks
+ *  and rewrites system/tools is a 400. Removing a leading run of thinking is the
+ *  documented-safe alternative. */
 export function convertPiMessages(
 	messages: PiMessage[],
 	customToolNameToSdk?: Map<string, string>,
+	dropThinking = false,
 ): { anthropicMessages: SessionMessage[]; sanitizedIds: Map<string, string>; dropped: DroppedContent } {
 	const anthropicMessages = [];
 	const sanitizedIds = new Map();
@@ -160,7 +166,7 @@ export function convertPiMessages(
 					// by any other provider — including pi's own Anthropic provider — is
 					// not ours to hand back, and Anthropic rejects ones it can't verify.
 					const sig = block.thinkingSignature;
-					if (msg.provider === PROVIDER_ID && sig) {
+					if (!dropThinking && msg.provider === PROVIDER_ID && sig) {
 						blocks.push({ type: "thinking", thinking: block.thinking ?? "", signature: sig });
 					} else {
 						dropped.thinking++;

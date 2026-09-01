@@ -7,8 +7,8 @@ import { repairToolPairing } from "cc-session-io";
 import { sanitizeToolId, convertPiMessages } from "../src/convert.js";
 
 /** Shorthand: convert pi messages and return just the anthropic messages. */
-function convert(messages, customToolNameToSdk) {
-	return convertPiMessages(messages, customToolNameToSdk).anthropicMessages;
+function convert(messages, customToolNameToSdk, dropThinking) {
+	return convertPiMessages(messages, customToolNameToSdk, dropThinking).anthropicMessages;
 }
 
 // --- Tests ---
@@ -165,6 +165,17 @@ describe("thinking block filtering", () => {
 		assert.equal(result[0].content.length, 2);
 		assert.equal(result[0].content[0].type, "thinking");
 		assert.equal(result[0].content[0].signature, "sig123");
+	});
+
+	it("dropThinking strips signed Claude thinking so a Fable 5.1 rebuild does not 400", () => {
+		const msgs = [
+			{ role: "assistant", provider: "claude-bridge", content: [
+				{ type: "thinking", thinking: "reasoning...", thinkingSignature: "sig123" },
+				{ type: "text", text: "answer" },
+			]},
+		];
+		const result = convert(msgs, undefined, true);
+		assert.deepEqual(result[0].content, [{ type: "text", text: "answer" }]);
 	});
 
 	// A signature minted by another provider isn't ours to replay into Claude

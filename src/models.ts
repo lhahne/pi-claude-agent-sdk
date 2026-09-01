@@ -2,14 +2,42 @@
 // `resolveModel` returns the first partial match, so `opus` resolves to the first-listed opus entry.
 // Extracted from index.ts so tests can import without activating the extension.
 
-export const MODEL_IDS_IN_ORDER = ["claude-fable-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-5", "claude-sonnet-4-6", "claude-haiku-4-5"];
+export const MODEL_IDS_IN_ORDER = ["claude-fable-5-1", "claude-fable-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-5", "claude-sonnet-4-6", "claude-haiku-4-5"];
+
+const TWO_HUNDRED_K_CONTEXT = 200_000;
+const ONE_M_CONTEXT = 1_000_000;
+
+/** Catalog stubs for IDs Claude Code already serves that the installed pi-ai has
+ *  not listed yet. Prefer pi-ai when it has the entry. Fable 5.1 shipped
+ *  2026-09-01; pi-ai 0.84.4 (2026-08-28) does not include it. */
+export const FALLBACK_MODELS: Record<string, {
+	id: string;
+	name: string;
+	reasoning: boolean;
+	input: string[];
+	contextWindow: number;
+	maxTokens: number;
+	thinkingLevelMap?: Record<string, string | null>;
+}> = {
+	"claude-fable-5-1": {
+		id: "claude-fable-5-1",
+		name: "Claude Fable 5.1",
+		reasoning: true,
+		input: ["text", "image"],
+		contextWindow: ONE_M_CONTEXT,
+		maxTokens: 128_000,
+		// Same shape as pi-ai's claude-fable-5: adaptive thinking, xhigh visible.
+		thinkingLevelMap: { off: null, xhigh: "xhigh", max: "max" },
+	},
+};
 
 // Project pi-ai's model entries down to the fields pi's registerProvider expects,
-// and keep MODEL_IDS_IN_ORDER ordering. IDs missing from pi-ai are silently dropped.
-// Context-dependent display labels are applied after plan/long-context config is known.
+// and keep MODEL_IDS_IN_ORDER ordering. IDs missing from pi-ai are silently dropped
+// unless FALLBACK_MODELS has a stub. Context-dependent display labels are applied
+// after plan/long-context config is known.
 export function buildModels<T extends { id: string; [key: string]: any }>(piAiModels: T[]) {
 	return MODEL_IDS_IN_ORDER
-		.map((id) => piAiModels.find((m) => m.id === id))
+		.map((id) => piAiModels.find((m) => m.id === id) ?? FALLBACK_MODELS[id])
 		.filter((m) => m != null)
 		// Forward thinkingLevelMap so pi-ai's per-model overrides (e.g. opus-4-8
 		// mapping xhigh→xhigh and max→max) are visible to the effort lookup.
@@ -32,9 +60,6 @@ export type ClaudeCodeRuntimeModel = {
 	contextWindow: number;
 };
 
-const TWO_HUNDRED_K_CONTEXT = 200_000;
-const ONE_M_CONTEXT = 1_000_000;
-
 // Measured Claude Agent SDK subscription/OAuth behavior. Do not infer this from
 // pi-ai's advertised contextWindow: bare Opus 4.7 serves 1M, bare Opus 4.8 does
 // not, and [1m] entitlement differs by model. See diag/CONTEXT-SIZE.md.
@@ -53,6 +78,11 @@ export function resolveClaudeCodeRuntimeModel(modelId: string, settings: LongCon
 				contextWindow: useOneM ? ONE_M_CONTEXT : TWO_HUNDRED_K_CONTEXT,
 			};
 		}
+		case "claude-fable-5-1":
+			// 1M is the default and the maximum, billed at standard rates across the
+			// whole window (no Extra Usage). CC still takes the [1m] suffix to request
+			// that window, same as Fable 5 / Opus 5.
+			return { cliModelId: "claude-fable-5-1[1m]", contextWindow: ONE_M_CONTEXT };
 		case "claude-fable-5":
 			return { cliModelId: "claude-fable-5[1m]", contextWindow: ONE_M_CONTEXT };
 		case "claude-sonnet-5":
@@ -74,9 +104,27 @@ export function claudeCodeModelId(model: { id: string }, settings: LongContextSe
 	return resolveClaudeCodeRuntimeModel(model.id, settings).cliModelId;
 }
 
+/** Adaptive thinking is always on. `thinking: enabled` with budget_tokens and
+ *  `disabled` both 400; omit thinking or send adaptive. `thinking.display`
+ *  defaults to omitted, so the stream has no thinking text unless we ask. */
+export function adaptiveThinkingAlwaysOn(modelId: string): boolean {
+	return modelId === "claude-fable-5-1" || modelId.startsWith("claude-fable-5-1[")
+		|| modelId === "claude-fable-5" || modelId.startsWith("claude-fable-5[");
+}
+
+/** Fable 5.1 binds each thinking block to the conversation prefix. Replaying a
+ *  block after a rebuild (new system prompt or tools) 400s with "The block is
+ *  bound to a different conversation". Resume is fine; rebuilds must drop
+ *  thinking. https://platform.claude.com/docs/en/models/fable-5-1/whats-new-fable-5-1#editing-earlier-turns-invalidates-thinking-blocks */
+export function thinkingBoundToPrefix(modelId: string): boolean {
+	return modelId === "claude-fable-5-1" || modelId.startsWith("claude-fable-5-1[");
+}
+
 export function resolveModel<T extends { id: string }>(models: T[], input: string): T | undefined {
 	const lower = input.toLowerCase();
-	return models.find((m) => m.id === lower || m.id.includes(lower));
+	// Exact match first: otherwise `claude-fable-5` would hit `claude-fable-5-1`
+	// via includes() when the newer id is listed first for the `fable` shortcut.
+	return models.find((m) => m.id === lower) ?? models.find((m) => m.id.includes(lower));
 }
 
 // Produce the model metadata registered with pi. The registered contextWindow must
