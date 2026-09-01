@@ -5,7 +5,7 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { MODEL_IDS_IN_ORDER, adaptiveThinkingAlwaysOn, applyLongContext, buildModels, claudeCodeModelId, resolveClaudeCodeRuntimeModel, resolveModel, thinkingBoundToPrefix } from "../src/models.js";
+import { MODEL_IDS_IN_ORDER, adaptiveThinkingAlwaysOn, applyLongContext, buildModels, claudeCodeModelId, minClaudeCodeVersionForModel, resolveClaudeCodeRuntimeModel, resolveModel, thinkingBoundToPrefix } from "../src/models.js";
 
 const PRO = { plan: "pro", longContextExtraUsage: false };
 const MAX = { plan: "max", longContextExtraUsage: false };
@@ -123,6 +123,13 @@ describe("Fable 5.1 thinking rules", () => {
 		assert.equal(thinkingBoundToPrefix("claude-fable-5-1[1m]"), true);
 		assert.equal(thinkingBoundToPrefix("claude-fable-5"), false);
 		assert.equal(thinkingBoundToPrefix("claude-opus-5"), false);
+	});
+
+	it("requires Claude Code 2.1.251", () => {
+		assert.equal(minClaudeCodeVersionForModel("claude-fable-5-1"), "2.1.251");
+		assert.equal(minClaudeCodeVersionForModel("claude-fable-5-1[1m]"), "2.1.251");
+		assert.equal(minClaudeCodeVersionForModel("claude-fable-5"), undefined);
+		assert.equal(minClaudeCodeVersionForModel("claude-opus-5"), undefined);
 	});
 });
 

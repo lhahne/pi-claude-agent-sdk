@@ -24,6 +24,7 @@ import {
 import { collectCarriedAttachments, placeCarriedAttachments, type CarriedAttachment } from "./attachments.js";
 import { createToolServer } from "./mcp-server.js";
 import { CC_CHILD_ENV, resolveClaudeChildEnv, type AnthropicAuthRegistry } from "./child-env.js";
+import { resolveClaudeCodeExecutable } from "./claude-executable.js";
 
 // Compat (#2): use factory if available (pi-ai ≥0.66), else fall back to constructor (gsd-pi etc.)
 const _piAi = piAi as any;
@@ -87,7 +88,7 @@ function debug(...args: unknown[]) {
 // Per-query CLI debug capture. When CLAUDE_BRIDGE_DEBUG=1, ask the Claude Code
 // CLI subprocess to write its own debug log to a file we choose, and also
 // forward its stderr into our debug stream. Drops straight into the real SDK's
-// Options — see @anthropic-ai/claude-agent-sdk sdk.d.ts:1245 (debug, debugFile,
+// Options — see @anthropic-ai/claude-agent-sdk sdk.d.ts:2091 (debug, debugFile,
 // stderr). Without this, CC's internal view of the world is invisible to us
 // and "No conversation found" / empty-error reports are unactionable.
 let nextCliDebugSeq = 1;
@@ -430,7 +431,9 @@ async function runIsolatedSummary(
 		const promptText = extractIsolatedSummaryPrompt(context.messages);
 		const cwd = (options as { cwd?: string } | undefined)?.cwd ?? process.cwd();
 		const compactProviderSettings = loadConfig(cwd).provider;
-		const claudeExecutable = compactProviderSettings?.pathToClaudeCodeExecutable;
+		const claudeExecutableResolution = resolveClaudeCodeExecutable(model.id, compactProviderSettings?.pathToClaudeCodeExecutable);
+		if (claudeExecutableResolution.error) throw new Error(claudeExecutableResolution.error);
+		const claudeExecutable = claudeExecutableResolution.path;
 		const cliModel = claudeCodeModelId(model, longContextSettings);
 		debug(`compact summary: spawn model=${cliModel} registeredModel=${model.id} promptLen=${promptText.length}`);
 		const childEnv = await resolveClaudeChildEnv(piModelRegistry);
@@ -1492,6 +1495,19 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	const queryCtx = isReentrant ? new QueryContext() : ctx();
 	debug(`provider: fresh query setup, isReentrant=${isReentrant}, activeContexts=${activeQueryContexts.size}`);
 
+	// Fail before claiming a stream if this model needs a newer CLI than we have.
+	const claudeExecutableResolution = resolveClaudeCodeExecutable(model.id, providerSettings.pathToClaudeCodeExecutable);
+	if (claudeExecutableResolution.error) {
+		debug(`provider: ${claudeExecutableResolution.error}`);
+		stream.push({ type: "error", reason: "error", error: newAssistantOutput(model, "", "error", claudeExecutableResolution.error) });
+		stream.end();
+		return stream;
+	}
+	const claudeExecutable = claudeExecutableResolution.path;
+	if (claudeExecutableResolution.source === "path") {
+		debug(`provider: using PATH claude ${claudeExecutable} (bundled CLI is too old for ${model.id})`);
+	}
+
 	// Resolved first: an unaccountable system prompt throws, and doing that before
 	// anything is claimed or reset leaves no half-built query behind — in particular
 	// no stream claimed on the shared context that nobody will ever end.
@@ -1561,7 +1577,6 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// programmatically and ignore filesystem MCP entries — applied unconditionally because
 	// settingSources is left at CC's default, which loads all sources.
 	const strictMcpConfigEnabled = providerSettings.strictMcpConfig !== false;
-	const claudeExecutable = providerSettings.pathToClaudeCodeExecutable;
 
 	// Prefer the model's own thinkingLevelMap when present (pi-ai 0.72+ ships
 	// per-model overrides — e.g. opus-4-7 wants xhigh→xhigh, not xhigh→max).

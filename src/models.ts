@@ -120,6 +120,14 @@ export function thinkingBoundToPrefix(modelId: string): boolean {
 	return modelId === "claude-fable-5-1" || modelId.startsWith("claude-fable-5-1[");
 }
 
+/** Minimum Claude Code CLI version that will accept this model. Undefined
+ *  means the SDK's bundled CLI is fine. Fable 5.1 400s on 2.1.141 with
+ *  "version 2.1.251 or newer is required". */
+export function minClaudeCodeVersionForModel(modelId: string): string | undefined {
+	if (modelId === "claude-fable-5-1" || modelId.startsWith("claude-fable-5-1[")) return "2.1.251";
+	return undefined;
+}
+
 export function resolveModel<T extends { id: string }>(models: T[], input: string): T | undefined {
 	const lower = input.toLowerCase();
 	// Exact match first: otherwise `claude-fable-5` would hit `claude-fable-5-1`

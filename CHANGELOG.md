@@ -1,5 +1,9 @@
 # Changelog
 
+## UNRELEASED
+
+- **Bump: @anthropic-ai/claude-agent-sdk ^0.3.257** — bundled Claude Code 2.1.257, which accepts Fable 5.1. `@anthropic-ai/sdk` (types) moves to ^0.93.0 to match the SDK peer. If a model again outruns the bundle, the bridge still falls back to a current `claude` on PATH (or `provider.pathToClaudeCodeExecutable`) instead of repeating Claude Code's 400.
+
 ## 0.8.4 — 2026-09-01
 
 - **Add: claude-fable-5-1 model** — Claude Fable 5.1 is selectable via `/model` and the `fable` shortcut now points to it. 1M context at standard rates (no Extra Usage). Adaptive thinking is always on (`xhigh` stays `xhigh`, thinking display is summarized even without an explicit effort). Session rebuilds drop thinking blocks because Fable 5.1 binds them to the conversation prefix and would 400 if we replayed them against a rewritten system prompt. Requires Claude Code 2.1.251+ (the bundled SDK CLI is older; set `provider.pathToClaudeCodeExecutable`). A catalog stub is used until pi-ai lists the id.
