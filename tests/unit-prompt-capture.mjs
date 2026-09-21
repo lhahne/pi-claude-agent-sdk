@@ -141,6 +141,85 @@ describe("PromptCaptures", () => {
 		assert.equal(diagnostics[0].matches[0].firstDivergent, 14);
 	});
 
+	it("recovers a turn whose prompt pi re-rendered with a different tool list", () => {
+		// pi renders `before_agent_start`'s systemPrompt from the tool loadout as it
+		// stands mid-dispatch, then corrects selectedTools to the live loadout before
+		// writing the transcript's sections. An extension calling setActiveTools()
+		// from its own handler — rpiv-ask-user-question strips its tool whenever
+		// ctx.hasUI is false — leaves the two renders differing by that tool's snippet
+		// and guidelines, and nothing else. The provider's prompt then matches no
+		// capture exactly, which used to fail every print, RPC and sub-agent turn.
+		const recorded = [
+			"You are an expert coding assistant operating inside pi.",
+			"- read: Read file contents from the filesystem",
+			"- ask_user_question: Ask the user up to 4 structured questions",
+			"- agent_browser: Browse websites, read live docs, click and fill pages",
+			"Use ask_user_question whenever the user's request is underspecified.",
+			"Current working directory: /work",
+		].join("\n");
+		// What the transcript holds: the same prompt minus that tool and its guideline.
+		const replayed = recorded
+			.split("\n")
+			.filter((line) => !line.includes("ask_user_question"))
+			.join("\n");
+
+		const fallbacks = [];
+		const captures = new PromptCaptures(64, undefined, (f) => fallbacks.push(f));
+		captures.record(recorded, capture({ contextFiles: [{ path: "/AGENTS.md", content: "rules" }] }));
+
+		const found = captures.resolveOrDerive(replayed);
+		assert.ok(found, "the turn should be served, not failed");
+		assert.equal(found.assembledPrompt, recorded, "the capture recorded this turn is the one used");
+		assert.equal(fallbacks.length, 1, "and the recovery is reported so it can be logged");
+		assert.equal(fallbacks[0].candidates, 1);
+	});
+
+	it("still refuses a turn whose prompt shares no structure with any capture", () => {
+		// The fallback must not become "any capture will do". A capture recorded this
+		// turn whose prompt is unrelated to what the provider is sending is exactly the
+		// silent instruction corruption this file exists to prevent.
+		const captures = new PromptCaptures();
+		captures.record(
+			[PI_HARNESS, "<project_context>unrelated rules</project_context>"].join("\n"),
+			capture({ contextFiles: [{ path: "/AGENTS.md", content: "unrelated rules" }] }),
+		);
+		assert.throws(
+			() => captures.resolveOrDerive("A completely different prompt an extension rebuilt from scratch."),
+			/no capture for this/,
+		);
+	});
+
+	it("refuses to choose between concurrent turns that both look consistent", () => {
+		// Two agent runs can record before either reaches a provider. Both prompts are
+		// supersets of the requested one, so containment cannot separate them and
+		// picking by recency would hand one agent the other's context files.
+		const shared = [
+			"You are an expert coding assistant operating inside pi.",
+			"Current working directory: /work",
+		].join("\n");
+		const requested = shared;
+		const captures = new PromptCaptures(64, undefined, () => {
+			assert.fail("an ambiguous turn must not be resolved");
+		});
+		captures.record(`${shared}\n<project_context>one</project_context>`, capture());
+		captures.record(`${shared}\n<project_context>two</project_context>`, capture());
+		assert.throws(() => captures.resolveOrDerive(requested), /no capture for this/);
+	});
+
+	it("consumes the turn's candidate so a later turn cannot reuse it", () => {
+		const recorded = "You are an expert coding assistant operating inside pi.\nCurrent working directory: /work";
+		const captures = new PromptCaptures();
+		captures.record(recorded, capture());
+		assert.ok(captures.resolveOrDerive(recorded), "the turn resolves");
+		// The next turn records nothing (pi reused the same prompt key), so there is no
+		// candidate left and an unrelated prompt must fail rather than be served the
+		// previous turn's capture.
+		assert.throws(
+			() => captures.resolveOrDerive("Something else entirely, with no shared structure at all."),
+			/no capture for this/,
+		);
+	});
+
 	it("recursively projects an inherited prompt without Pi's harness", () => {
 		const browser = skill("browser");
 		const captures = new PromptCaptures();

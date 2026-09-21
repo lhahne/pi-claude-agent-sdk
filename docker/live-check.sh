@@ -162,7 +162,30 @@ else
 	echo "prompt mutation: fixture not mounted — skipped"
 fi
 
-# --- 6. Session files actually on disk ----------------------------------------------
+# --- 6. Tool stripped mid-dispatch (the prompt-capture fallback) ---------------------
+# @juicesharp/rpiv-ask-user-question strips its own tool from the active set inside its
+# before_agent_start handler whenever ctx.hasUI is false. pi renders event.systemPrompt
+# from the tool loadout as it stands mid-dispatch, then corrects selectedTools to the
+# live loadout after the handlers run, so the prompt the bridge records differs from the
+# transcript the provider is handed by that tool's snippet and guidelines. Every print,
+# RPC and sub-agent turn failed on this before the fallback existed.
+REAL_EXT=/home/node/probe/node_modules/@juicesharp/rpiv-ask-user-question
+if [[ -d "$REAL_EXT" ]]; then
+	OUT6="$WORK/strip.txt"
+	: > "$LOG"
+	pi --no-session -ne -e "$PKG" -e "$REAL_EXT" --model "$MODEL" \
+		-p "Reply with just the word strip-ok" > "$OUT6" 2>&1
+	RC=$?
+	check "tool stripped: exit 0" "$([[ $RC -eq 0 ]] && echo 1 || echo 0)" "exit=$RC"
+	check "tool stripped: answered" "$(grep -qi 'strip-ok' "$OUT6" && echo 1 || echo 0)" "$(tail -c 160 "$OUT6")"
+	check "tool stripped: no capture failure" "$(grep -q 'prompt-capture: no capture' "$LOG" && echo 0 || echo 1)" "$(grep -m1 -o 'prompt-capture: no capture.*' "$LOG" | cut -c1-160)"
+	check "tool stripped: recovered this turn's capture" "$(grep -q 'fell back to this turn' "$LOG" && echo 1 || echo 0)" "the mismatch should be recovered, not silent"
+	assert_log_invariants "tool stripped"
+else
+	echo "tool stripped: extension not installed — skipped"
+fi
+
+# --- 7. Session files actually on disk ----------------------------------------------
 # The direct counterexample to "file missing after save": at least one CC
 # transcript must exist and be non-empty.
 SESS_COUNT=$(find "$HOME/.claude/projects" -name '*.jsonl' -size +0 2>/dev/null | wc -l | tr -d ' ')

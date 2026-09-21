@@ -92,6 +92,17 @@ case "$MODE" in
 	live)
 		prepare_pkg
 		prepare_creds
+		# Best-effort: the third-party extension the prompt-capture fallback exists for.
+		# It strips its own tool from the active set inside before_agent_start whenever
+		# ctx.hasUI is false, which is what makes pi's rendered prompt and the transcript
+		# pi writes disagree. Installed rather than modelled with a fixture because a
+		# fixture could not reproduce it: registerTool does not put a tool into the base
+		# prompt options, so stripping it was a no-op and the check passed without
+		# exercising anything. A failed install just skips the check.
+		if [[ ! -d /home/node/probe/node_modules/@juicesharp/rpiv-ask-user-question ]]; then
+			npm install --prefix /home/node/probe --no-audit --no-fund --silent \
+				@juicesharp/rpiv-ask-user-question >/dev/null 2>&1 || true
+		fi
 		exec bash /harness/live-check.sh "$@"
 		;;
 	*)

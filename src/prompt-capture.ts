@@ -46,6 +46,34 @@ export type PromptCaptureDiagnostic = {
 	matches: { key: string; firstDivergent: number }[];
 };
 
+/** Reported when a turn's prompt matched no capture exactly and the capture
+ *  recorded during that same turn was used instead. */
+export type PromptCaptureFallback = {
+	/** What the provider asked to resolve. */
+	requested: string;
+	/** The capture recorded during this turn, which it was given instead. */
+	used: PromptCapture;
+	/** How many captures had been recorded since the last resolution. */
+	candidates: number;
+};
+
+/** Cap on `pending`. Concurrent agent runs are bounded by the fan-out of a single
+ *  turn, and a candidate list this long already means a tie that `takePending`
+ *  will refuse to break. */
+const PENDING_LIMIT = 16;
+
+/** Lines shorter than this are ignored by `isLineSubset`. They carry no
+ *  instruction — blank lines, `</available_skills>`, a lone bullet — and matching
+ *  on them would let containment pass for prompts that share nothing meaningful. */
+const MIN_COMPARED_LINE_LENGTH = 12;
+
+/** Whether every substantial line of `left` also appears in `right`. */
+function isLineSubset(left: string, right: string): boolean {
+	const rightLines = new Set(right.split("\n"));
+	return left.split("\n").every((line) =>
+		line.trim().length < MIN_COMPARED_LINE_LENGTH || rightLines.has(line));
+}
+
 export class PromptCaptures {
 	private readonly captures = new Map<string, PromptCapture>();
 	/** Invoked with everything that would otherwise be lost when resolution throws,
@@ -56,6 +84,16 @@ export class PromptCaptures {
 	 *  pass one per instance. */
 	private readonly onDiagnose: (diagnostic: PromptCaptureDiagnostic) => void;
 
+	/** Reported when the per-turn fallback in `resolveOrDerive` fires. Separate from
+	 *  `onDiagnose`, which only runs when resolution is about to throw: this one is a
+	 *  recovery, and the bridge logs it as a warning rather than a failure. */
+	private readonly onFallback: (fallback: PromptCaptureFallback) => void;
+
+	/** Captures recorded since the last resolution, one per agent run that has
+	 *  started but not yet reached a provider. The fallback in `resolveOrDerive`
+	 *  reads this; see `takePending` for why it is not simply "the latest". */
+	private readonly pending: PromptCapture[] = [];
+
 	/** Pi rebuilds prompts when tools change, so retain only recent lookup keys.
 	 *  Inheritance edges hold direct references and survive key eviction.
 	 *
@@ -65,8 +103,13 @@ export class PromptCaptures {
 	 *  own next turn would be evicted despite being in use. The bound exists only to
 	 *  cap an extension that rebuilds the prompt every turn, which would otherwise
 	 *  grow keys without limit. */
-	constructor(private readonly limit = 256, onDiagnose?: (diagnostic: PromptCaptureDiagnostic) => void) {
+	constructor(
+		private readonly limit = 256,
+		onDiagnose?: (diagnostic: PromptCaptureDiagnostic) => void,
+		onFallback?: (fallback: PromptCaptureFallback) => void,
+	) {
 		this.onDiagnose = onDiagnose ?? (() => {});
+		this.onFallback = onFallback ?? (() => {});
 	}
 
 	record(systemPrompt: string, input: PromptCaptureInput): void {
@@ -91,6 +134,10 @@ export class PromptCaptures {
 		// Mutate an existing node in place so descendants retain a live reference,
 		// then re-insert its key so Map order tracks recency.
 		this.touch(systemPrompt, capture);
+		// Deduped by identity: a second package root, or pi rebuilding the same
+		// prompt, must not read as two candidates for the same turn.
+		if (!this.pending.includes(capture)) this.pending.push(capture);
+		while (this.pending.length > PENDING_LIMIT) this.pending.shift();
 	}
 
 	/** Exact lookup only. Callers serving a query want `resolveOrDerive`. */
@@ -139,6 +186,7 @@ export class PromptCaptures {
 		const exact = this.captures.get(systemPrompt);
 		if (exact) {
 			this.touch(systemPrompt, exact);
+			this.pending.length = 0;
 			return exact;
 		}
 
@@ -149,11 +197,14 @@ export class PromptCaptures {
 		const revived = this.reachableCaptures().find((node) => node.assembledPrompt === systemPrompt);
 		if (revived) {
 			this.touch(systemPrompt, revived);
+			this.pending.length = 0;
 			return revived;
 		}
 
 		const embedded = this.findInheritedPrompts(systemPrompt, systemPrompt);
 		if (embedded.length === 0) {
+			const fallback = this.takePending(systemPrompt);
+			if (fallback) return fallback;
 			const matches = this.closestKnown(systemPrompt);
 			this.onDiagnose({ systemPrompt, matches });
 			throw new Error(
@@ -172,7 +223,53 @@ export class PromptCaptures {
 		// `custom` is the prompt itself and the edges keep their original offsets, so
 		// projectCustom substitutes the embedded captures in place and preserves every
 		// byte between and around them.
+		this.pending.length = 0;
 		return { assembledPrompt: systemPrompt, custom: systemPrompt, contextFiles: [], skills: [], inherited: embedded };
+	}
+
+	/** The capture recorded during this turn, used when pi's own render and its
+	 *  transcript disagree.
+	 *
+	 *  They can. `before_agent_start` renders the prompt from the tool loadout as it
+	 *  stands mid-dispatch, and pi then corrects `selectedTools` to the live loadout
+	 *  before writing the transcript's sections. An extension that calls
+	 *  `setActiveTools()` from its own `before_agent_start` handler therefore leaves
+	 *  the two renders differing by that tool's snippet and guidelines — which is a
+	 *  real, supported pattern (rpiv-ask-user-question strips its tool whenever
+	 *  `ctx.hasUI` is false, so print, RPC and sub-agent runs all hit it). The prompt
+	 *  is otherwise the same turn's, so the capture recorded moments earlier still
+	 *  describes it.
+	 *
+	 *  Deliberately not "the most recent capture". Several candidates means
+	 *  concurrent agent runs, and choosing between them by recency would hand one
+	 *  agent another's context files — the silent instruction corruption this whole
+	 *  file exists to prevent. So a tie is broken only by evidence: a candidate must
+	 *  be consistent with the prompt the provider is about to send. */
+	private takePending(requested: string): PromptCapture | undefined {
+		const candidates = [...new Set(this.pending)];
+		this.pending.length = 0;
+		if (candidates.length === 0) return undefined;
+		const usable = candidates.filter((capture) => this.consistentWith(capture, requested));
+		if (usable.length !== 1) return undefined;
+		this.onFallback({ requested, used: usable[0], candidates: candidates.length });
+		return usable[0];
+	}
+
+	/** Whether this capture can account for the prompt the provider is about to send.
+	 *
+	 *  The mismatch being recovered from is pi removing (or adding) a tool between its
+	 *  render and the transcript, which rewrites the tool list and that tool's guideline
+	 *  bullets and nothing else — so one prompt's lines are a subset of the other's.
+	 *  Requiring that containment is what keeps this from degrading into "any capture
+	 *  will do": a prompt that merely *should* be related, or one an extension rebuilt
+	 *  from scratch, shares no such structure and still fails loudly below.
+	 *
+	 *  Short lines are ignored. Every prompt shares blank lines, section headers and
+	 *  stray bullets, and matching on those would make containment nearly free to
+	 *  satisfy — the guard would pass exactly when it should not. */
+	private consistentWith(capture: PromptCapture, requested: string): boolean {
+		return isLineSubset(capture.assembledPrompt, requested)
+			|| isLineSubset(requested, capture.assembledPrompt);
 	}
 
 	get size(): number {

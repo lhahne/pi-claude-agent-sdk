@@ -835,6 +835,16 @@ const promptCaptures = getSharedPromptCaptures(() => new PromptCaptures(256, (di
 			: "no known captures to compare against."
 		) + ` known keys=${diagnostic.matches.length}`,
 	);
+}, (fallback) => {
+	// A recovery, not a failure — but worth saying out loud, because it means pi's
+	// render and its transcript disagreed and the turn was served from the capture
+	// recorded moments earlier instead. If this fires often, the mismatch is no
+	// longer the narrow tool-loadout case it was written for.
+	debug(
+		`prompt-capture: fell back to this turn's capture — provider prompt (${fallback.requested.length} chars) `
+		+ `matched no capture exactly; used the ${fallback.used.assembledPrompt.length}-char one recorded this turn `
+		+ `(${fallback.candidates} candidate(s), ${fallback.used.skills.length} skill(s), ${fallback.used.contextFiles.length} context file(s))`,
+	);
 }));
 
 /** Whatever a settled session left behind, named in one greppable line.
