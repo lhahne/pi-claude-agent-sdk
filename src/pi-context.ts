@@ -32,7 +32,9 @@ export interface PiProviderContext {
 	/** The transcript with every system message removed. */
 	messages: Message[];
 	/** Whether the transcript carried a system message at all. False for a bare
-	 *  completion with neither a prompt nor tools, which pi sends unnormalized. */
+	 *  completion with neither a prompt nor tools — `createInitialSystemMessage`
+	 *  returns undefined for an empty prompt and tool set, so there is no leading
+	 *  message to read. */
 	transcript: boolean;
 }
 
@@ -42,9 +44,12 @@ export function normalizePiContext(context: TranscriptContext): PiProviderContex
 
 	if (systemMessages.length === 0) {
 		// No system message is normal when the caller supplied neither a prompt nor
-		// tools. Stray explicit fields are not: they mean a raw `Context` reached a
-		// provider that only ever receives normalized transcripts, and reading them
-		// would silently drop any mid-conversation prompt change pi recorded.
+		// tools. Stray explicit fields are not: they mean a raw `Context` — the shape
+		// pi used before 0.86 — reached a provider that now only ever receives
+		// normalized transcripts. Reading them would appear to work while silently
+		// dropping any mid-conversation prompt change pi recorded, so refuse instead.
+		// Nothing in pi calls a provider without normalizing, so this is a misuse
+		// guard rather than a compatibility path.
 		const legacy = context as unknown as { systemPrompt?: string; tools?: Tool[] };
 		if (legacy.systemPrompt || legacy.tools?.length) {
 			throw new Error(

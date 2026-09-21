@@ -7,9 +7,14 @@ export const MODEL_IDS_IN_ORDER = ["claude-fable-5-1", "claude-fable-5", "claude
 const TWO_HUNDRED_K_CONTEXT = 200_000;
 const ONE_M_CONTEXT = 1_000_000;
 
-/** Catalog stubs for IDs Claude Code already serves that the installed pi-ai has
- *  not listed yet. Prefer pi-ai when it has the entry. Fable 5.1 shipped
- *  2026-09-01; pi-ai 0.84.4 (2026-08-28) does not include it. */
+/** Catalog stubs for IDs Claude Code serves that the installed pi-ai may not list
+ *  yet. Prefer pi-ai when it has the entry.
+ *
+ *  Kept even though pi-ai currently lists every ID in MODEL_IDS_IN_ORDER. Claude
+ *  Code ships models ahead of pi-ai's catalog — Fable 5.1 landed 2026-09-01, four
+ *  days after pi-ai 0.84.4 — and an ID missing from both places is silently
+ *  dropped from the picker rather than failing, so this is the floor that keeps a
+ *  new model selectable until pi-ai catches up. */
 export const FALLBACK_MODELS: Record<string, {
 	id: string;
 	name: string;
@@ -32,9 +37,9 @@ export const FALLBACK_MODELS: Record<string, {
 };
 
 // Project pi-ai's model entries down to the fields pi's registerProvider expects,
-// and keep MODEL_IDS_IN_ORDER ordering. IDs missing from pi-ai are silently dropped
-// unless FALLBACK_MODELS has a stub. Context-dependent display labels are applied
-// after plan/long-context config is known.
+// and keep MODEL_IDS_IN_ORDER ordering. IDs missing from pi-ai fall back to their
+// FALLBACK_MODELS stub, or are dropped when there is none. Context-dependent
+// display labels are applied after plan/long-context config is known.
 export function buildModels<T extends { id: string; [key: string]: any }>(piAiModels: T[]) {
 	return MODEL_IDS_IN_ORDER
 		.map((id) => piAiModels.find((m) => m.id === id) ?? FALLBACK_MODELS[id])

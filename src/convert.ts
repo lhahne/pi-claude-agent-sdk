@@ -140,17 +140,14 @@ export function convertPiMessages(
 	let turnAssistantIdx: number | null = null;
 
 	for (const msg of messages) {
-		// System messages are not conversation history. Pi 0.86's transcript context
-		// carries the system prompt and the tool declarations in a leading one; the
-		// provider normalizes those away before conversion (see pi-context.ts), so
-		// reaching this branch means something upstream skipped that step. Skipping is
-		// correct here — the prompt reaches Claude Code through its own system prompt
-		// — but a transcript made only of system messages converts to nothing, and
+		// System messages are not conversation history. Pi's transcript context carries
+		// the system prompt and the tool declarations in a leading one; the provider
+		// normalizes those away before conversion (see pi-context.ts), so reaching this
+		// branch means something upstream skipped that step. Skipping is correct here —
+		// the prompt reaches Claude Code through its own system prompt — but a
+		// transcript made only of system messages converts to nothing, and
 		// convertAndImportMessages refuses to resume the session that would produce.
-		//
-		// Cast rather than `msg.role === "system"`: pi-ai before 0.86 has no system
-		// message in its Message union, and the direct comparison is a type error there.
-		if ((msg as { role: string }).role === "system") continue;
+		if (msg.role === "system") continue;
 		if (msg.role === "user") {
 			if (typeof msg.content === "string") {
 				anthropicMessages.push({ role: "user", content: msg.content || "[empty]" });

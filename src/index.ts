@@ -1,5 +1,4 @@
-import { calculateCost, type AssistantMessage, type AssistantMessageEventStream, type ImageContent, type Message, type Model, type SimpleStreamOptions, type TextContent, type Tool, type TranscriptContext, type UserMessage } from "@earendil-works/pi-ai";
-import * as piAi from "@earendil-works/pi-ai";
+import { calculateCost, createAssistantMessageEventStream, type AssistantMessage, type AssistantMessageEventStream, type ImageContent, type Message, type Model, type SimpleStreamOptions, type TextContent, type Tool, type TranscriptContext, type UserMessage } from "@earendil-works/pi-ai";
 import { getModels } from "@earendil-works/pi-ai/compat";
 import { type ExtensionAPI, type ExtensionContext, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { query, type EffortLevel, type SDKMessage, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
@@ -26,13 +25,6 @@ import { collectCarriedAttachments, placeCarriedAttachments, type CarriedAttachm
 import { createToolServer } from "./mcp-server.js";
 import { CC_CHILD_ENV, resolveClaudeChildEnv, type AnthropicAuthRegistry } from "./child-env.js";
 import { resolveClaudeCodeExecutable } from "./claude-executable.js";
-
-// Compat (#2): use factory if available (pi-ai ≥0.66), else fall back to constructor (gsd-pi etc.)
-const _piAi = piAi as any;
-const newAssistantMessageEventStream: () => AssistantMessageEventStream =
-	typeof _piAi.createAssistantMessageEventStream === "function"
-		? _piAi.createAssistantMessageEventStream
-		: () => new _piAi.AssistantMessageEventStream();
 
 // --- Debug logging ---
 // CLAUDE_BRIDGE_DEBUG=1 enables debug logging to ~/.pi/agent/claude-bridge.log
@@ -436,7 +428,7 @@ function describeRateLimitFailure(rejection: { rateLimitType?: string; resetsAt?
 }
 
 function standaloneStreamFn(model: Model<any>, context: PiProviderContext, options?: SimpleStreamOptions): AssistantMessageEventStream {
-	const stream = newAssistantMessageEventStream();
+	const stream = createAssistantMessageEventStream();
 	void runStandaloneRequest(model, context, options, stream);
 	return stream;
 }
@@ -1452,7 +1444,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: TranscriptContext, opt
 	}
 
 	showStartupNoticeOnce();
-	const stream = newAssistantMessageEventStream();
+	const stream = createAssistantMessageEventStream();
 
 	// DEBUG: trace followUp message triggering
 	const lastMsgRole = pi.messages[pi.messages.length - 1]?.role;
@@ -1602,9 +1594,9 @@ function streamClaudeAgentSdk(model: Model<any>, context: TranscriptContext, opt
 	// settingSources is left at CC's default, which loads all sources.
 	const strictMcpConfigEnabled = providerSettings.strictMcpConfig !== false;
 
-	// Prefer the model's own thinkingLevelMap when present (pi-ai 0.72+ ships
-	// per-model overrides — e.g. opus-4-7 wants xhigh→xhigh, not xhigh→max).
-	// Fall back to our generic table for older pi-ai or unmapped levels.
+	// The model's own thinkingLevelMap wins when it maps this level — e.g. opus-4-7
+	// wants xhigh→xhigh, not xhigh→max. The generic table covers levels a model
+	// leaves unmapped.
 	const effort = options?.reasoning
 		? ((model as any).thinkingLevelMap?.[options.reasoning] as EffortLevel | undefined)
 			?? REASONING_TO_EFFORT[options.reasoning]

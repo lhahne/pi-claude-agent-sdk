@@ -156,11 +156,7 @@ if [[ -f "$FIXTURE" ]]; then
 	# replayed from every system message in order, so a replay that dropped or
 	# reordered the third patch would leave Claude answering MUTATION2.
 	check "prompt mutation: latest section reached Claude" "$(grep -q 'MUTATION3' "$OUT5" && echo 1 || echo 0)" "$(tail -c 200 "$OUT5")"
-	# Transcript-backed deltas only exist from 0.86; on 0.85 the prompt is passed
-	# wholesale, so there is nothing to carry.
-	if [[ "$(pi --version)" == 0.86.* ]]; then
-		check "prompt mutation: transcript carried deltas" "$(grep -q 'systemMsgs=[1-9]' "$LOG" && echo 1 || echo 0)" "no mid-conversation system messages seen"
-	fi
+	check "prompt mutation: transcript carried deltas" "$(grep -q 'systemMsgs=[1-9]' "$LOG" && echo 1 || echo 0)" "no mid-conversation system messages seen"
 	assert_log_invariants "prompt mutation"
 else
 	echo "prompt mutation: fixture not mounted — skipped"

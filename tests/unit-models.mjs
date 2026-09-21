@@ -41,8 +41,10 @@ describe("MODELS projection", () => {
 		assert.deepEqual(models.map((m) => m.id), MODEL_IDS_IN_ORDER);
 	});
 
-	it("silently drops IDs missing from pi-ai unless a fallback stub exists", () => {
-		// Only haiku present — opus/sonnet vanish. Fable 5.1 is stubbed until pi-ai lists it.
+	it("falls back to a stub for an ID pi-ai has not listed", () => {
+		// Only haiku present — every other ID vanishes, except one with a stub. This is
+		// the path that keeps a model selectable when Claude Code ships it ahead of
+		// pi-ai's catalog, which is how the Fable 5.1 stub came to exist.
 		const models = buildModels([mockPiAiModel("claude-haiku-4-5")]);
 		assert.deepEqual(models.map((m) => m.id), ["claude-fable-5-1", "claude-haiku-4-5"]);
 	});
