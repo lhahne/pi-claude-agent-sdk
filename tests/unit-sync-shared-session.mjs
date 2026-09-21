@@ -57,6 +57,35 @@ describe("syncSharedSession", () => {
 		}
 	});
 
+	// The pi 0.86 regression, at the layer where it did its damage.
+	//
+	// pi 0.86 delivers the system prompt as a leading transcript message. Counted as
+	// history it becomes the only "prior" message, converts to zero Anthropic
+	// records, and cc-session-io writes no file for an empty session — after which
+	// the caller resumes a UUID that does not exist and Claude Code answers "No
+	// conversation found with session ID". Every step of that was silent.
+	//
+	// The provider now normalizes system messages away before this point, so this
+	// shape should never arrive. The guard is what makes that a caught mistake
+	// rather than a repeat of the same several-hours-later failure.
+	it("refuses to build a session from a history that converts to nothing", () => {
+		const cwd = mkdtempSync(join(tmpdir(), "sync-shared-session-"));
+		try {
+			assert.throws(
+				() => __test.syncSharedSession(
+					[
+						{ role: "system", content: "You are pi.", timestamp: 0 },
+						{ role: "user", content: "hi", timestamp: Date.now() },
+					],
+					cwd,
+				),
+				/refusing to resume a session that was never written/,
+			);
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
 	// The rebuilt file holds one line per record, and a carried `@file` expansion
 	// is an `attachment` record — which `session.messages` filters out. Counting
 	// messages told every user who at-mentioned a file before switching providers

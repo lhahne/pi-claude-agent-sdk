@@ -15,6 +15,8 @@ Use Opus/Sonnet/Haiku as models in pi, with all tool calls flowing through pi's 
 
 ## Install
 
+Requires **pi 0.86 or newer**. Pi 0.86 changed how a custom provider receives its system prompt and tools, and this fork tracks the current pi rather than the 0.82–0.85 provider API.
+
 ```
 pi install npm:pi-claude-agent-sdk
 ```

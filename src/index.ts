@@ -1,4 +1,4 @@
-import { calculateCost, type AssistantMessage, type AssistantMessageEventStream, type Context, type ImageContent, type Model, type SimpleStreamOptions, type TextContent, type Tool, type UserMessage } from "@earendil-works/pi-ai";
+import { calculateCost, type AssistantMessage, type AssistantMessageEventStream, type ImageContent, type Message, type Model, type SimpleStreamOptions, type TextContent, type Tool, type TranscriptContext, type UserMessage } from "@earendil-works/pi-ai";
 import * as piAi from "@earendil-works/pi-ai";
 import { getModels } from "@earendil-works/pi-ai/compat";
 import { type ExtensionAPI, type ExtensionContext, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
@@ -9,6 +9,7 @@ import { appendFileSync, mkdirSync, realpathSync, statSync } from "fs";
 import { homedir } from "os";
 import { dirname, join } from "path";
 import { PROVIDER_ID, messageContentToText, convertPiMessages } from "./convert.js";
+import { normalizePiContext, type PiProviderContext } from "./pi-context.js";
 import { adaptiveThinkingAlwaysOn, applyLongContext, buildModels, claudeCodeModelId, thinkingBoundToPrefix, type LongContextSettings } from "./models.js";
 import { MCP_SERVER_NAME, MCP_TOOL_PREFIX } from "./skills.js";
 import { verifyWrittenSession as _verifyWrittenSession } from "./session-verify.js";
@@ -213,7 +214,7 @@ let sharedSession: SessionState | null = null;
 // prefix Claude Code cached.
 function convertAndImportMessages(
 	session: ReturnType<typeof createSession>,
-	messages: Context["messages"],
+	messages: Message[],
 	customToolNameToSdk?: Map<string, string>,
 	carried?: readonly CarriedAttachment[],
 	dropThinking = false,
@@ -221,6 +222,18 @@ function convertAndImportMessages(
 	const { anthropicMessages, sanitizedIds, dropped } = convertPiMessages(messages, customToolNameToSdk, dropThinking);
 
 	debug(`convertAndImportMessages: ${messages.length} pi msgs → ${anthropicMessages.length} anthropic msgs`);
+	// A non-empty history that converts to nothing means the caller handed this
+	// converter a shape it does not understand — most likely system messages that
+	// should have been normalized away (pi 0.86's transcript context). Continuing
+	// writes no session file at all, and the caller then resumes a session that was
+	// never created: Claude Code answers "No conversation found", several steps
+	// removed from the actual cause. Fail at the cause instead.
+	if (messages.length > 0 && anthropicMessages.length === 0) {
+		throw new Error(
+			`convertAndImportMessages: ${messages.length} pi message(s) converted to 0 anthropic records `
+			+ `(roles: ${messages.map((m) => m.role).join(",")}) — refusing to resume a session that was never written.`,
+		);
+	}
 	debug(`convertAndImportMessages: imported roles:`, anthropicMessages.map((m, i) => {
 		const c = m.content;
 		if (typeof c === "string") return `[${i}]${m.role}:text`;
@@ -266,10 +279,10 @@ function convertAndImportMessages(
 // Pi doesn't pass tool results directly — it appends them to the context and calls
 // the provider again. Thin wrapper over extract-tool-results.js that adds per-turn
 // debug logging at the extraction boundary.
-function extractAllToolResults(context: Context): McpResult[] {
-	const { results, stopIdx } = _extractAllToolResults(context.messages as unknown as Array<{ role: string; [key: string]: unknown }>);
-	debug(`extractAllToolResults: ${results.length} results from ${context.messages.length} msgs, stopped at index ${stopIdx}`);
-	debug(`extractAllToolResults: all msg roles:`, context.messages.map((m, i) => `[${i}]${m.role}`).join(" "));
+function extractAllToolResults(messages: Message[]): McpResult[] {
+	const { results, stopIdx } = _extractAllToolResults(messages as unknown as Array<{ role: string; [key: string]: unknown }>);
+	debug(`extractAllToolResults: ${results.length} results from ${messages.length} msgs, stopped at index ${stopIdx}`);
+	debug(`extractAllToolResults: all msg roles:`, messages.map((m, i) => `[${i}]${m.role}`).join(" "));
 	for (let r = 0; r < results.length; r++) {
 		debug(`extractAllToolResults: result[${r}] id=${results[r].toolCallId}${results[r].isError ? " ERROR" : ""} preview:`, JSON.stringify(results[r].content).slice(0, 150));
 	}
@@ -285,14 +298,14 @@ function extractAllToolResults(context: Context): McpResult[] {
  *  prompt. Deriving both halves from one index is what keeps a message from
  *  landing in both — an extension appending a display-only user message after
  *  the real one (see issue #34) makes the turn longer than one message. */
-function turnStart(messages: Context["messages"]): number {
+function turnStart(messages: Message[]): number {
 	let i = messages.length;
 	while (i > 0 && messages[i - 1].role === "user") i--;
 	return i;
 }
 
 /** Extract the current user turn as a prompt string. Returns null if the last message is not a user message. */
-function extractUserPrompt(messages: Context["messages"]): string | null {
+function extractUserPrompt(messages: Message[]): string | null {
 	const turn = messages.slice(turnStart(messages)) as UserMessage[];
 	if (turn.length === 0) return null;
 	// Drop empties before joining so an all-empty turn still yields "" and trips
@@ -305,7 +318,7 @@ function extractUserPrompt(messages: Context["messages"]): string | null {
 
 /** Extract the current user turn as ContentBlockParam[] (preserving images).
  *  Returns null if no images — caller should fall back to string prompt. */
-function extractUserPromptBlocks(messages: Context["messages"]): ContentBlockParam[] | null {
+function extractUserPromptBlocks(messages: Message[]): ContentBlockParam[] | null {
 	const turn = messages.slice(turnStart(messages)) as UserMessage[];
 	if (turn.length === 0) return null;
 
@@ -366,8 +379,8 @@ function newAssistantOutput(model: Model<any>, text: string, stopReason: Assista
 	};
 }
 
-function extractStandalonePrompt(context: Context): string {
-	if (context.tools?.length) {
+function extractStandalonePrompt(context: PiProviderContext): string {
+	if (context.tools.length) {
 		throw new Error(`standalone provider requests do not support tools (got ${context.tools.length})`);
 	}
 	const messages = context.messages;
@@ -386,9 +399,9 @@ function extractStandalonePrompt(context: Context): string {
  * standalone requests. They must never enter the resumable provider path: its
  * prompt capture and shared Claude Code session belong to the interactive
  * agent, not to an unrelated planner or summarizer. */
-function isStandaloneRequest(context: Context, options?: SimpleStreamOptions): boolean {
+function isStandaloneRequest(context: PiProviderContext, options?: SimpleStreamOptions): boolean {
 	return options?.cacheRetention === "none"
-		&& context.tools === undefined
+		&& context.tools.length === 0
 		&& context.messages.length === 1
 		&& context.messages[0]?.role === "user";
 }
@@ -422,7 +435,7 @@ function describeRateLimitFailure(rejection: { rateLimitType?: string; resetsAt?
 	return `Claude rate limit${kind}${resets}: ${failure}`;
 }
 
-function standaloneStreamFn(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
+function standaloneStreamFn(model: Model<any>, context: PiProviderContext, options?: SimpleStreamOptions): AssistantMessageEventStream {
 	const stream = newAssistantMessageEventStream();
 	void runStandaloneRequest(model, context, options, stream);
 	return stream;
@@ -430,7 +443,7 @@ function standaloneStreamFn(model: Model<any>, context: Context, options?: Simpl
 
 async function runStandaloneRequest(
 	model: Model<any>,
-	context: Context,
+	context: PiProviderContext,
 	options: SimpleStreamOptions | undefined,
 	stream: AssistantMessageEventStream,
 ): Promise<void> {
@@ -625,7 +638,7 @@ function debugSessionPaths(label: string, cwd: string, jsonlPath: string): void 
 // Log strings still say "Case 1/2/3/4" so existing diagnostics (int-cache.sh,
 // int-session-resume.mjs) keep grepping the same anchors.
 function syncSharedSession(
-	messages: Context["messages"],
+	messages: Message[],
 	cwd: string,
 	customToolNameToSdk?: Map<string, string>,
 	modelId?: string,
@@ -740,6 +753,7 @@ export const __test = {
 	buildMcpServers,
 	isStandaloneRequest,
 	extractStandalonePrompt,
+	normalizePiContext,
 };
 
 // --- Provider helpers: tool name mapping ---
@@ -863,7 +877,7 @@ function contextForToolResults(results: McpResult[]): QueryContext | undefined {
 	return undefined;
 }
 
-function resolveMcpTools(context: Context): {
+function resolveMcpTools(tools: Tool[]): {
 	mcpTools: Tool[];
 	customToolNameToSdk: Map<string, string>;
 	customToolNameToPi: Map<string, string>;
@@ -872,9 +886,7 @@ function resolveMcpTools(context: Context): {
 	const customToolNameToSdk = new Map<string, string>();
 	const customToolNameToPi = new Map<string, string>();
 
-	if (!context.tools) return { mcpTools, customToolNameToSdk, customToolNameToPi };
-
-	for (const tool of context.tools) {
+	for (const tool of tools) {
 		const sdkName = `${MCP_TOOL_PREFIX}${tool.name}`;
 		mcpTools.push(tool);
 		customToolNameToSdk.set(tool.name, sdkName);
@@ -1334,7 +1346,7 @@ async function consumeQuery(
 
 /** The trailing user turn as content blocks, or null if there isn't one.
  *  Blocks rather than text so image steers keep their images. */
-function steerBlocks(messages: Context["messages"]): ContentBlockParam[] | null {
+function steerBlocks(messages: Message[]): ContentBlockParam[] | null {
 	const blocks = extractUserPromptBlocks(messages);
 	if (blocks) return blocks;
 	const text = extractUserPrompt(messages);
@@ -1425,25 +1437,33 @@ function drainForAbort(c: QueryContext, promptStream: PromptStream): void {
 /** Provider entry point. Pi calls this for normal agent turns, but also for
  * standalone no-cache completions made by compaction and extensions. Route the
  * latter before touching prompt captures or resumable-session state. */
-function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
-	if (isStandaloneRequest(context, options)) {
+function streamClaudeAgentSdk(model: Model<any>, context: TranscriptContext, options?: SimpleStreamOptions): AssistantMessageEventStream {
+	// Pi 0.86 hands providers a normalized transcript: the system prompt and the tool
+	// declarations ride in a leading system message rather than context.systemPrompt
+	// and context.tools. Normalizing once, here at the boundary, is what keeps the
+	// session cursor, the history/prompt split and the message conversion in a single
+	// index space — the 0.86 break was that leading system message being counted as
+	// history, converted to zero records, and the empty session then resumed.
+	const pi = normalizePiContext(context);
+
+	if (isStandaloneRequest(pi, options)) {
 		debug(`provider: routing standalone cacheRetention=none request to isolated subprocess`);
-		return standaloneStreamFn(model, context, options);
+		return standaloneStreamFn(model, pi, options);
 	}
 
 	showStartupNoticeOnce();
 	const stream = newAssistantMessageEventStream();
 
 	// DEBUG: trace followUp message triggering
-	const lastMsgRole = context.messages[context.messages.length - 1]?.role;
-	debug(`provider: streamClaudeAgentSdk called, activeQuery=${!!ctx().activeQuery}, lastMsgRole=${lastMsgRole}, isReentrant=${ctx().activeQuery !== null}`);
+	const lastMsgRole = pi.messages[pi.messages.length - 1]?.role;
+	debug(`provider: streamClaudeAgentSdk called, activeQuery=${!!ctx().activeQuery}, lastMsgRole=${lastMsgRole}, isReentrant=${ctx().activeQuery !== null}, transcript=${pi.transcript}, systemMsgs=${context.messages.length - pi.messages.length}`);
 
 	const activeQuery = ctx().activeQuery !== null;
-	const allResults = activeQueryContexts.size > 0 ? extractAllToolResults(context) : [];
+	const allResults = activeQueryContexts.size > 0 ? extractAllToolResults(pi.messages) : [];
 	const resultCtx = allResults.length > 0 ? contextForToolResults(allResults) : undefined;
 	const isReentrantUserQuery = activeQuery && lastMsgRole === "user" && allResults.length === 0;
 	if (isReentrantUserQuery) {
-		debug(`provider: active query user-only call treated as reentrant fresh query, waitingHandlers=${ctx().pendingToolCalls.size}, ctx.msgs=${context.messages.length}`);
+		debug(`provider: active query user-only call treated as reentrant fresh query, waitingHandlers=${ctx().pendingToolCalls.size}, ctx.msgs=${pi.messages.length}`);
 	}
 
 	// --- Tool result delivery ---
@@ -1456,27 +1476,27 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		// User messages (steer/followUp) pi injected into context during the
 		// active query: a steer sent while a tool was executing, drained by pi at
 		// the turn boundary and appended alongside the tool result.
-		const steer = lastMsgRole === "user" ? steerBlocks(context.messages) : null;
+		const steer = lastMsgRole === "user" ? steerBlocks(pi.messages) : null;
 		// Delivery is async because the steer must reach CC's stdin *before* the
 		// tool result does — see deliverToolResults. Detached so the provider
 		// still returns its stream synchronously.
-		void deliverToolResults(resultCtx, allResults, steer, context.messages.length);
+		void deliverToolResults(resultCtx, allResults, steer, pi.messages.length);
 		// The shared cursor tracks the top-level conversation. A reentrant subagent
 		// delivering its own results would drag it to that subagent's message count
 		// — observed pulling a parent from 5 back to 3, which cost the parent's next
 		// turn a full rebuild and a flushed prompt cache.
-		if (sharedSession && resultCtx === ctx()) sharedSession.cursor = context.messages.length;
-		resultCtx.latestCursor = Math.max(resultCtx.latestCursor, context.messages.length);
+		if (sharedSession && resultCtx === ctx()) sharedSession.cursor = pi.messages.length;
+		resultCtx.latestCursor = Math.max(resultCtx.latestCursor, pi.messages.length);
 		return stream;
 	}
 
 	// --- Orphaned tool result (e.g. user aborted a tool call) ---
 	// The query is gone but pi still delivered the result. Nothing to do — just
 	// emit end_turn so pi waits for the next real user message.
-	const lastMsg = context.messages[context.messages.length - 1];
+	const lastMsg = pi.messages[pi.messages.length - 1];
 	if (lastMsg?.role === "toolResult") {
 		debug(`provider: orphaned tool result after abort, emitting end_turn`);
-		if (sharedSession && activeQueryContexts.size === 0) sharedSession.cursor = context.messages.length;
+		if (sharedSession && activeQueryContexts.size === 0) sharedSession.cursor = pi.messages.length;
 		// No query owns this result, so there is no context to reset: resetTurnState
 		// on the top-level ctx() would replace a live parent's turnOutput mid-stream,
 		// stranding the blocks it had already emitted. A throwaway context just
@@ -1515,12 +1535,12 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// Resolved first: an unaccountable system prompt throws, and doing that before
 	// anything is claimed or reset leaves no half-built query behind — in particular
 	// no stream claimed on the shared context that nobody will ever end.
-	const { mcpTools, customToolNameToSdk, customToolNameToPi } = resolveMcpTools(context);
+	const { mcpTools, customToolNameToSdk, customToolNameToPi } = resolveMcpTools(pi.tools);
 	// Build from what Pi loaded for this run, so `--no-context-files` and
 	// `--no-skills` reach Claude Code by leaving nothing to forward. A sub-agent's
 	// custom override embeds its parent's assembled Pi prompt; recursive projection
 	// replaces that exact inherited prompt with its already-safe portable parts.
-	const promptCapture = promptCaptures.resolveOrDerive(context.systemPrompt);
+	const promptCapture = promptCaptures.resolveOrDerive(pi.systemPrompt);
 	const systemPromptAppend = promptCapture
 		? projectPromptCapture(promptCapture, {
 			skillReadTool: mcpTools.some((tool) => tool.name === "read") ? "mcp" : "none",
@@ -1543,22 +1563,22 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// cliModel is the actual id sent to Claude Code (may carry [1m]); model.id is the
 	// pi-registered id. Log cliModel so debug lines reflect what CC actually received.
 	const cliModel = claudeCodeModelId(model, longContextSettings);
-	const syncResult = syncSharedSession(context.messages, cwd, customToolNameToSdk, cliModel);
+	const syncResult = syncSharedSession(pi.messages, cwd, customToolNameToSdk, cliModel);
 	const { sessionId: resumeSessionId } = syncResult;
-	const promptBlocks = extractUserPromptBlocks(context.messages);
-	let promptText = extractUserPrompt(context.messages) ?? "";
+	const promptBlocks = extractUserPromptBlocks(pi.messages);
+	let promptText = extractUserPrompt(pi.messages) ?? "";
 
 	// Guard: empty prompt means the last context message isn't a user message.
 	// This should never happen with per-query state — dump diagnostics if it does.
 	if (!promptText && !promptBlocks) {
 		diagDump("empty_prompt", {
-			contextLength: context.messages.length,
+			contextLength: pi.messages.length,
 			lastMsgRole: lastMsg?.role,
 			isReentrant,
 			activeQueryContexts: activeQueryContexts.size,
 			activeQueryExists: queryCtx.activeQuery !== null,
 			sharedSession: sharedSession ? { sessionId: sharedSession.sessionId.slice(0, 8), cursor: sharedSession.cursor } : null,
-			messageRoles: context.messages.map((m, i) => `[${i}]${m.role}`).join(" "),
+			messageRoles: pi.messages.map((m, i) => `[${i}]${m.role}`).join(" "),
 		});
 		// Recover: use a continuation prompt so the SDK doesn't send an empty text block
 		promptText = "[continue]";
@@ -1640,7 +1660,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	};
 
 	debug("provider: fresh query",
-		`model=${cliModel} msgs=${context.messages.length} tools=${mcpTools.length}`,
+		`model=${cliModel} msgs=${pi.messages.length} tools=${mcpTools.length}`,
 		`resume=${resumeSessionId?.slice(0, 8) ?? "none"} effort=${effort ?? "default"}`,
 		`ctxFiles=${promptCapture?.contextFiles.length ?? 0} strictMcp=${strictMcpConfigEnabled}`,
 		`prompt=${promptText.slice(0, 60)}${promptBlocks ? " [+images]" : ""}`);
@@ -1708,7 +1728,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 			}
 			debug(`provider: query done, ignoring captured session ${capturedSessionId?.slice(0, 8) ?? "none"} to preserve shared session`);
 		} else if (sessionId) {
-			const cursor = Math.max(context.messages.length, queryCtx.latestCursor, sharedSession?.cursor ?? 0);
+			const cursor = Math.max(pi.messages.length, queryCtx.latestCursor, sharedSession?.cursor ?? 0);
 			debug(`provider: query done, session=${sessionId.slice(0, 8)}, cursor=${cursor}`);
 			sharedSession = { sessionId, cursor, cwd };
 		}
@@ -1864,7 +1884,8 @@ export default function (pi: ExtensionAPI) {
 			apiKey: "not-used",
 			api: "claude-bridge",
 			models: registeredModels,
-			// Cast: pi-ai AssistantMessageEventStream diamond dep between pi-coding-agent and pi-agent-core
+			// Cast for the pi-ai AssistantMessageEventStream diamond dep between
+			// pi-coding-agent and pi-agent-core.
 			streamSimple: streamClaudeAgentSdk as any,
 		});
 	} else {

@@ -28,18 +28,29 @@ import { fileURLToPath } from "node:url";
 
 // Located by path, not require.resolve: the package defines no `exports` main, so
 // it cannot be resolved by specifier at all.
+const PI_PKG = fileURLToPath(new URL("../node_modules/@earendil-works/pi-coding-agent/package.json", import.meta.url));
 const PI_DIST = fileURLToPath(new URL("../node_modules/@earendil-works/pi-coding-agent/dist/core", import.meta.url));
 
-/** Consumers we have accounted for: what keeps each off the provider, and how many
+/** Reviewed consumers, keyed by the pi minor version whose dist was read.
+ *
+ *  Entries we have accounted for: what keeps each off the provider, and how many
  *  times it mentions `streamFn`. The count matters as much as the filename — a new
  *  entry point added *inside* an already-listed file is exactly the shape of the
  *  branch-summarization miss, and a filename-only inventory would wave it through.
- *  A changed count is not automatically a bug; it means read the diff and re-decide. */
-const HANDLED = {
-	"agent-session.js": { mentions: 1, why: "the one hand-off: `streamFn: this.agent.streamFunction` into generateBranchSummary" },
-	"sdk.js": { mentions: 2, why: "constructs the agent, does not summarize" },
-	"compaction/compaction.js": { mentions: 13, why: "completeSummarization marks calls cacheRetention=none, routed to a standalone subprocess" },
-	"compaction/branch-summarization.js": { mentions: 2, why: "uses completeSummarization's cacheRetention=none standalone route" },
+ *  A changed count is not automatically a bug; it means read the diff and re-decide.
+ *
+ *  Keyed by version, and an unreviewed pi minor fails rather than passes. The
+ *  upstream package's mistake was a peer range that admitted every later pi release
+ *  while its code only worked against one; bumping pi should mean reading its dist,
+ *  not discovering the change from a user. Add a "<minor>" entry when bumping. */
+const REVIEWED = {
+	"0.86": {
+		"agent-session.js": { mentions: 2, why: "`streamFn: this.agent.streamFunction` into generateBranchSummary, and into summarizeForBugReport" },
+		"sdk.js": { mentions: 2, why: "constructs the agent, does not summarize" },
+		"compaction/compaction.js": { mentions: 13, why: "completeSummarization marks calls cacheRetention=none, routed to a standalone subprocess" },
+		"compaction/branch-summarization.js": { mentions: 2, why: "uses completeSummarization's cacheRetention=none standalone route" },
+		"bug-report.js": { mentions: 1, why: "`/bug`'s optional model-written summary, via completeSummarization's cacheRetention=none route" },
+	},
 };
 
 const mentionsOf = (text) => (text.match(/streamFn/g) ?? []).length;
@@ -52,9 +63,20 @@ function jsFilesUnder(dir, prefix = "") {
 	});
 }
 
+const piVersion = JSON.parse(readFileSync(PI_PKG, "utf8")).version;
+const piMinor = piVersion.split(".").slice(0, 2).join(".");
+
 describe("pi streamFn consumers", () => {
-	it("are all ones we have accounted for, in the same places", () => {
+	it(`are all ones we have accounted for, in the same places (pi ${piVersion})`, () => {
 		assert.ok(existsSync(PI_DIST), `pi's dist is not at ${PI_DIST} — its layout changed, so this inventory is blind`);
+
+		const handled = REVIEWED[piMinor];
+		assert.ok(
+			handled,
+			`pi ${piMinor} has not been reviewed. Read its dist for new streamFn consumers, decide how each is kept off `
+			+ `the provider, and add a "${piMinor}" entry to REVIEWED. Reviewed so far: ${Object.keys(REVIEWED).join(", ")}.`,
+		);
+
 		const found = new Map(
 			jsFilesUnder(PI_DIST)
 				.map(({ rel, full }) => [rel, mentionsOf(readFileSync(full, "utf8"))])
@@ -64,7 +86,7 @@ describe("pi streamFn consumers", () => {
 
 		assert.ok(found.size > 0, `no streamFn consumers found under ${PI_DIST} — did pi's layout change?`);
 
-		const unexpected = [...found.keys()].filter((rel) => !(rel in HANDLED));
+		const unexpected = [...found.keys()].filter((rel) => !(rel in handled));
 		assert.deepEqual(
 			unexpected,
 			[],
@@ -73,11 +95,11 @@ describe("pi streamFn consumers", () => {
 		);
 
 		// If one of these disappears, its routing justification may now be dead.
-		const missing = Object.keys(HANDLED).filter((rel) => !found.has(rel));
+		const missing = Object.keys(handled).filter((rel) => !found.has(rel));
 		assert.deepEqual(missing, [], `these no longer consume streamFn — is the takeover still needed? ${missing.join(", ")}`);
 
-		const drifted = [...found].filter(([rel, n]) => HANDLED[rel].mentions !== n)
-			.map(([rel, n]) => `${rel}: ${HANDLED[rel].mentions} -> ${n}`);
+		const drifted = [...found].filter(([rel, n]) => handled[rel].mentions !== n)
+			.map(([rel, n]) => `${rel}: ${handled[rel].mentions} -> ${n}`);
 		assert.deepEqual(
 			drifted,
 			[],
